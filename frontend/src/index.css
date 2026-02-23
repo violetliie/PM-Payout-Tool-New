@@ -1,0 +1,50 @@
+@import "tailwindcss";
+
+/* ================================================================
+   Polymarket Theme — Custom CSS Variables & Base Styles
+   ================================================================ */
+
+@theme {
+  --color-poly-blue: #2563eb;
+  --color-poly-blue-dark: #1d4ed8;
+  --color-poly-blue-light: #3b82f6;
+  --color-poly-green: #16a34a;
+  --color-poly-red: #dc2626;
+  --color-poly-gray-50: #f9fafb;
+  --color-poly-gray-100: #f3f4f6;
+  --color-poly-gray-200: #e5e7eb;
+  --color-poly-gray-300: #d1d5db;
+  --color-poly-gray-400: #9ca3af;
+  --color-poly-gray-500: #6b7280;
+  --color-poly-gray-700: #374151;
+  --color-poly-gray-800: #1f2937;
+  --color-poly-gray-900: #111827;
+}
+
+/* ================================================================
+   Base Styles
+   ================================================================ */
+
+body {
+  margin: 0;
+  font-family: "Inter", "SF Pro Display", -apple-system, BlinkMacSystemFont,
+    "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: #ffffff;
+  color: var(--color-poly-gray-900);
+}
+
+/* ================================================================
+   Custom Spinner Animation
+   ================================================================ */
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spinner {
+  animation: spin 1s linear infinite;
+}
