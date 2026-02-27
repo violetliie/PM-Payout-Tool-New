@@ -18,10 +18,9 @@ Output:
 
 import io
 import logging
-import ssl
-import urllib.request
 from typing import Optional
 
+import httpx
 import pandas as pd
 
 import config
@@ -168,16 +167,10 @@ def _fetch_sheet_csv() -> pd.DataFrame:
         url = url.rstrip("&") + "&output=csv"
 
     try:
-        # macOS Python often has SSL cert issues with Google Sheets.
-        # Use a permissive SSL context as a workaround.
-        ssl_ctx = ssl.create_default_context()
-        ssl_ctx.check_hostname = False
-        ssl_ctx.verify_mode = ssl.CERT_NONE
-
         logger.debug(f"Fetching: {url}")
-        response = urllib.request.urlopen(url, context=ssl_ctx, timeout=30)
-        raw_bytes = response.read()
-        csv_text = raw_bytes.decode("utf-8")
+        response = httpx.get(url, timeout=30, follow_redirects=True, verify=False)
+        response.raise_for_status()
+        csv_text = response.text
 
         # Parse CSV — header=None so we get raw row indices
         df = pd.read_csv(io.StringIO(csv_text), header=None)
