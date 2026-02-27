@@ -32,8 +32,8 @@ logger = logging.getLogger(__name__)
 # Column indices (0-based) — matches the published Google Sheet layout
 # ---------------------------------------------------------------------------
 COL_CREATOR_NAME = 1       # Column B
-COL_INSTAGRAM_HANDLE = 16  # Column Q
-COL_TIKTOK_HANDLE = 17     # Column R
+COL_INSTAGRAM_HANDLE = 15  # Column P ("Insta Handle")
+COL_TIKTOK_HANDLE = 16     # Column Q ("Tiktok Handle")
 DATA_START_ROW = 2         # Rows 0-1 are headers
 
 
@@ -66,7 +66,7 @@ def fetch_creator_mapping() -> tuple[list[Creator], dict[str, str], dict[str, st
     if df.shape[1] < COL_TIKTOK_HANDLE + 1:
         raise RuntimeError(
             f"Google Sheet has only {df.shape[1]} columns, "
-            f"expected at least {COL_TIKTOK_HANDLE + 1} (through Column R). "
+            f"expected at least {COL_TIKTOK_HANDLE + 1} (through Column Q). "
             "Check that the correct sheet/tab is published."
         )
 
