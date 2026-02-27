@@ -51,7 +51,7 @@ export default function ResultsCard({ summary, filename, onDownload }) {
       value: summary.total_paired?.toLocaleString() ?? "0",
       icon: (
         <svg className="h-5 w-5 text-poly-green" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M13.19 8.688a4.5 4.5 0 011.242 7.244l-4.5 4.5a4.5 4.5 0 01-6.364-6.364l1.757-1.757m9.86-9.86a4.5 4.5 0 00-6.364 6.364L12 10.5" />
+          <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
         </svg>
       ),
     },
@@ -60,7 +60,7 @@ export default function ResultsCard({ summary, filename, onDownload }) {
       value: summary.total_unpaired?.toLocaleString() ?? "0",
       icon: (
         <svg className="h-5 w-5 text-poly-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M13.181 8.68a4.503 4.503 0 011.903 6.405m-9.768-2.782L3.56 14.06a4.5 4.5 0 006.364 6.365l3.129-3.129m5.614-5.615l1.757-1.757a4.5 4.5 0 00-6.364-6.365l-3.129 3.129m0 0a4.503 4.503 0 00-1.903 6.405M10.5 13.5l-1.5-1.5" />
+          <path strokeLinecap="round" strokeLinejoin="round" d="M9.75 9.75l4.5 4.5m0-4.5l-4.5 4.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
         </svg>
       ),
     },

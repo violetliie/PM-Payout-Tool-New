@@ -41,7 +41,11 @@ export async function calculatePayouts(startDate, endDate) {
     try {
       const errorData = await response.json();
       if (errorData.detail) {
-        errorMessage = errorData.detail;
+        // FastAPI detail can be a string OR an object { status, message }
+        errorMessage =
+          typeof errorData.detail === "string"
+            ? errorData.detail
+            : errorData.detail.message || JSON.stringify(errorData.detail);
       }
     } catch {
       // Response body wasn't JSON — use status text
