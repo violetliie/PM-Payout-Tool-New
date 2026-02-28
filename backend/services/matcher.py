@@ -29,10 +29,10 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from PIL import Image
+import imagehash
 
 from models.schemas import Video, PayoutUnit, ExceptionVideo
-from services.frame_extractor import get_frame, compare_frames, is_same_video
+from services.frame_extractor import get_phash, compare_hashes, is_same_video
 
 logger = logging.getLogger(__name__)
 
@@ -267,9 +267,10 @@ def _match_all_creators(
     logger.info(f"Step 7: grouped into {len(creator_groups)} creators")
 
     # ------------------------------------------------------------------
-    # Shared frame cache — each video extracted only once across all creators
+    # Shared phash cache — each video extracted only once across all creators
+    # Only stores 64-bit hashes (~100 bytes each), not full images (~2.7MB each)
     # ------------------------------------------------------------------
-    frame_cache: dict[str, Optional[Image.Image]] = {}
+    phash_cache: dict[str, Optional[imagehash.ImageHash]] = {}
 
     # ------------------------------------------------------------------
     # Process each creator
@@ -287,7 +288,7 @@ def _match_all_creators(
         )
 
         payout_units, exceptions = _match_creator_videos(
-            creator_name, tiktok_videos, instagram_videos, frame_cache
+            creator_name, tiktok_videos, instagram_videos, phash_cache
         )
 
         all_payout_units.extend(payout_units)
@@ -300,7 +301,7 @@ def _match_creator_videos(
     creator_name: str,
     tiktok_videos: list[Video],
     instagram_videos: list[Video],
-    frame_cache: Optional[dict[str, Optional[Image.Image]]] = None,
+    phash_cache: Optional[dict[str, Optional[imagehash.ImageHash]]] = None,
 ) -> tuple[list[PayoutUnit], list[ExceptionVideo]]:
     """
     Match videos for a single creator using sequence + length + phash algorithm.
@@ -315,8 +316,8 @@ def _match_creator_videos(
         payout_units: Paired payout units for this creator
         exceptions:   Unpaired + extraction-failed videos
     """
-    if frame_cache is None:
-        frame_cache = {}
+    if phash_cache is None:
+        phash_cache = {}
 
     # ------------------------------------------------------------------
     # Step 8: Sort by created_at ascending
@@ -352,24 +353,24 @@ def _match_creator_videos(
             continue  # Both stay unmatched for Step 10
 
         # Check 2: First frame phash comparison
-        tt_frame = get_frame(tt_video.ad_link, frame_cache)
-        ig_frame = get_frame(ig_video.ad_link, frame_cache)
+        tt_hash = get_phash(tt_video.ad_link, phash_cache)
+        ig_hash = get_phash(ig_video.ad_link, phash_cache)
 
-        if tt_frame is None:
+        if tt_hash is None:
             logger.debug(f"  Pair #{i+1}: TT frame extraction failed")
             exceptions.append(_build_extraction_failed_exception(tt_video))
             tt_used.add(i)  # Mark as used so Step 10 skips it
             continue
 
-        if ig_frame is None:
+        if ig_hash is None:
             logger.debug(f"  Pair #{i+1}: IG frame extraction failed")
             exceptions.append(_build_extraction_failed_exception(ig_video))
             ig_used.add(i)
             continue
 
-        phash_dist = compare_frames(tt_frame, ig_frame)
+        phash_dist = compare_hashes(tt_hash, ig_hash)
 
-        if is_same_video(tt_frame, ig_frame):
+        if is_same_video(tt_hash, ig_hash):
             # Confirmed match
             payout_units.append(_build_paired_unit(
                 creator_name, tt_video, ig_video,
@@ -407,33 +408,33 @@ def _match_creator_videos(
     # Check for extraction failures in unmatched pool first
     valid_tt = []
     for idx, video in unmatched_tt:
-        frame = get_frame(video.ad_link, frame_cache)
-        if frame is None:
+        h = get_phash(video.ad_link, phash_cache)
+        if h is None:
             exceptions.append(_build_extraction_failed_exception(video))
             tt_used.add(idx)
         else:
-            valid_tt.append((idx, video, frame))
+            valid_tt.append((idx, video, h))
 
     valid_ig = []
     for idx, video in unmatched_ig:
-        frame = get_frame(video.ad_link, frame_cache)
-        if frame is None:
+        h = get_phash(video.ad_link, phash_cache)
+        if h is None:
             exceptions.append(_build_extraction_failed_exception(video))
             ig_used.add(idx)
         else:
-            valid_ig.append((idx, video, frame))
+            valid_ig.append((idx, video, h))
 
     # Build length index for Instagram candidates (for fast lookup)
-    ig_by_length: dict[int, list[tuple[int, Video, Image.Image]]] = {}
-    for idx, video, frame in valid_ig:
+    ig_by_length: dict[int, list[tuple[int, Video, imagehash.ImageHash]]] = {}
+    for idx, video, h in valid_ig:
         if video.video_length is not None:
             length = video.video_length
             if length not in ig_by_length:
                 ig_by_length[length] = []
-            ig_by_length[length].append((idx, video, frame))
+            ig_by_length[length].append((idx, video, h))
 
     # For each unmatched TikTok, find best phash match among same-length IG
-    for tt_idx, tt_video, tt_frame in valid_tt:
+    for tt_idx, tt_video, tt_hash in valid_tt:
         if tt_idx in tt_used:
             continue  # Already matched by a prior fallback iteration
         if tt_video.video_length is None:
@@ -443,11 +444,11 @@ def _match_creator_videos(
         best_ig_idx = None
         best_phash = None
 
-        for ig_idx, ig_video, ig_frame in candidates:
+        for ig_idx, ig_video, ig_hash in candidates:
             if ig_idx in ig_used:
                 continue
 
-            phash_dist = compare_frames(tt_frame, ig_frame)
+            phash_dist = compare_hashes(tt_hash, ig_hash)
             if phash_dist <= 10:
                 if best_phash is None or phash_dist < best_phash:
                     best_ig_idx = ig_idx

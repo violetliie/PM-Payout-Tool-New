@@ -4,18 +4,24 @@ First frame extraction and perceptual hash comparison for cross-platform video m
 Uses yt-dlp to download videos and ffmpeg to extract the first frame,
 then computes perceptual hashes (phash) via imagehash for comparison.
 
+Memory-efficient: images are discarded immediately after computing phash.
+Only the 64-bit hash is cached, not the full 720x1280 PIL Image (~2.7MB each).
+
 Functions:
   extract_first_frame(ad_link) -> Image | None
       Download video, extract frame 0, return as PIL Image.
 
-  compare_frames(img1, img2) -> int
-      Compute phash hamming distance between two images.
+  extract_phash(ad_link) -> ImageHash | None
+      Download video, extract frame, compute phash, discard image.
 
-  is_same_video(img1, img2, threshold=10) -> bool
+  get_phash(ad_link, cache) -> ImageHash | None
+      Cached wrapper around extract_phash.
+
+  compare_hashes(h1, h2) -> int
+      Hamming distance between two phash values.
+
+  is_same_video(h1, h2, threshold=10) -> bool
       True if hamming distance <= threshold.
-
-  get_frame(ad_link, cache) -> Image | None
-      Cached wrapper around extract_first_frame.
 
 Performance: ~1.8 seconds per video. Both TikTok and Instagram
 produce 720x1280 first frames — no normalization needed.
@@ -178,69 +184,95 @@ def extract_first_frame(ad_link: str) -> Optional[Image.Image]:
 
 
 # ===========================================================================
+# Phash extraction (memory-efficient — discards image immediately)
+# ===========================================================================
+
+def extract_phash(ad_link: str) -> Optional[imagehash.ImageHash]:
+    """
+    Download a video, extract first frame, compute phash, discard image.
+
+    This is the memory-efficient alternative to extract_first_frame().
+    The PIL Image (~2.7MB at 720x1280) is discarded immediately after
+    computing the 64-bit phash.
+
+    Args:
+        ad_link: The video URL (TikTok or Instagram)
+
+    Returns:
+        ImageHash of the first frame, or None if extraction fails.
+    """
+    img = extract_first_frame(ad_link)
+    if img is None:
+        return None
+    phash = imagehash.phash(img)
+    # Image is discarded when it goes out of scope here
+    del img
+    return phash
+
+
+# ===========================================================================
 # Perceptual hash comparison
 # ===========================================================================
 
-def compare_frames(img1: Image.Image, img2: Image.Image) -> int:
+def compare_hashes(
+    hash1: imagehash.ImageHash,
+    hash2: imagehash.ImageHash,
+) -> int:
     """
-    Compute the perceptual hash hamming distance between two images.
+    Compute the hamming distance between two perceptual hashes.
 
-    Uses imagehash.phash() — a 64-bit perceptual hash that captures
-    visual similarity. Distance 0 = identical, 0-10 = same video,
-    30+ = different video.
+    Distance 0 = identical, 0-10 = same video, 30+ = different video.
 
     Args:
-        img1: First PIL Image
-        img2: Second PIL Image
+        hash1: First phash
+        hash2: Second phash
 
     Returns:
         Hamming distance (int) between the two phashes.
     """
-    hash1 = imagehash.phash(img1)
-    hash2 = imagehash.phash(img2)
     return hash1 - hash2
 
 
 def is_same_video(
-    img1: Image.Image,
-    img2: Image.Image,
+    hash1: imagehash.ImageHash,
+    hash2: imagehash.ImageHash,
     threshold: int = PHASH_THRESHOLD,
 ) -> bool:
     """
-    Check if two images represent the same video based on phash distance.
+    Check if two phashes represent the same video.
 
     Args:
-        img1:      First PIL Image (first frame)
-        img2:      Second PIL Image (first frame)
+        hash1:     First phash
+        hash2:     Second phash
         threshold: Maximum hamming distance to consider a match (default: 10)
 
     Returns:
         True if the hamming distance <= threshold.
     """
-    return compare_frames(img1, img2) <= threshold
+    return compare_hashes(hash1, hash2) <= threshold
 
 
 # ===========================================================================
-# Cached frame extraction
+# Cached phash extraction
 # ===========================================================================
 
-def get_frame(
+def get_phash(
     ad_link: str,
-    cache: dict[str, Optional[Image.Image]],
-) -> Optional[Image.Image]:
+    cache: dict[str, Optional[imagehash.ImageHash]],
+) -> Optional[imagehash.ImageHash]:
     """
-    Extract a video's first frame, using a cache to avoid re-downloading.
+    Extract a video's phash, using a cache to avoid re-downloading.
 
     Each video is only downloaded and processed once per pipeline run.
-    Cache is keyed by ad_link.
+    Cache stores only the 64-bit phash (~100 bytes), not the full image.
 
     Args:
         ad_link: The video URL
-        cache:   Shared dict[ad_link → Image | None]
+        cache:   Shared dict[ad_link -> ImageHash | None]
 
     Returns:
-        PIL Image of the first frame, or None if extraction failed.
+        ImageHash of the first frame, or None if extraction failed.
     """
     if ad_link not in cache:
-        cache[ad_link] = extract_first_frame(ad_link)
+        cache[ad_link] = extract_phash(ad_link)
     return cache[ad_link]
