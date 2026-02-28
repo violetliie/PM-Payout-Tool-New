@@ -155,8 +155,8 @@ A web-based tool that automates the calculation of creator payouts for Polymarke
   `https://docs.google.com/spreadsheets/d/e/2PACX-1vTQcA8MAAhZ4urj_91M7rq80UwsmR3XePus2j2Ky-iZD_j_YSC5U5-kdSf2P1E73fohaAZWqJ6a4i2w/pub?gid=651686011&single=true&output=csv`
 - **Key columns**:
   - Column B (index 1): `creator_name` (the canonical name used for payouts)
-  - Column Q (index 16): `instagram_handle`
-  - Column R (index 17): `tiktok_handle`
+  - Column P (index 15): `instagram_handle`
+  - Column Q (index 16): `tiktok_handle`
 - **Data starts at row 3** (rows 1-2 are headers/labels — skip them)
 - **Purpose**: Maps platform-specific handles to a single creator identity
 
@@ -237,7 +237,7 @@ Within each creator:
 
 This creates a stable posting sequence across the entire pay period.
 
-### Step 9: Primary Match — Sequence Match + Length Confirmation
+### Step 9: Primary Match — Sequence + Exact Length + First Frame Confirmation
 
 Try to pair by position in the sorted sequence:
 - TikTok #1 ↔ Instagram #1
@@ -245,41 +245,44 @@ Try to pair by position in the sorted sequence:
 - TikTok #3 ↔ Instagram #3
 - etc.
 
-Then **confirm** each pair using `video_length`:
-- **Exact match** → accept. Set `match_confidence = "high"`, `pair_note = "exact match"`
-- **Any length mismatch** → reject this pair, go to Step 10 fallback
+Then **confirm** each pair using two checks:
+
+**Check 1 — Exact `video_length` match (required)**:
+- Lengths must be exactly equal (no tolerance). If different → reject pair, both go to unmatched pool for Step 10.
+
+**Check 2 — First frame perceptual hash (required)**:
+- Extract first frame from both videos using `yt-dlp` (download video) + `ffmpeg` (extract frame 0)
+- Compute perceptual hash (`imagehash.phash`) on both frames
+- If hamming distance ≤ 10 → confirmed match, pair is accepted
+- If hamming distance > 10 → reject pair, both go to unmatched pool for Step 10
+- Delete temp video files immediately after frame extraction
 
 If one platform has more videos than the other (e.g., 5 TikToks, 3 Instagrams):
-- Pair #1↔#1, #2↔#2, #3↔#3 (with length confirmation for each)
-- TikTok #4 and #5 remain unpaired (standalone)
+- Pair #1↔#1, #2↔#2, #3↔#3 (with length + phash confirmation for each)
+- TikTok #4 and #5 go to unmatched pool
 
-### Step 10: Fallback — If Sequence Pair Fails Length Check
+### Step 10: Fallback — Unmatched Pool Matching
 
-When a sequence pair fails the length confirmation:
+After Step 9, collect all unmatched videos (rejected pairs + extras) for each creator.
 
-Search within the **same creator** for a better match on the other platform using:
-1. Exact `video_length` match
-2. Same `uploaded_at` date (required — if either video has no `uploaded_at`, fallback is skipped)
-3. Closest `created_at` (within ±24 hours)
+For each unmatched video on one platform, search for a match on the other platform:
+1. **Exact `video_length` match** (required) — find all candidates on the other platform with the same length
+2. **First frame perceptual hash confirmation** (required) — for each length-matched candidate, extract first frames and compare phash
+3. If phash distance ≤ 10 → matched pair (treated identically to Step 9 matches)
+4. If multiple candidates match length, use the one with the lowest phash distance
 
-If a fallback match is found:
-- Set `match_confidence = "medium"`
-- Set `pair_note = "fallback match: same length, same upload date, closest created_at"`
+If no match is found → video stays unpaired.
 
-If no fallback match is found:
-- Both videos in the failed pair remain **unpaired** (standalone)
-- Set `match_confidence = "low / exception"`
-- Flag for review in Exceptions
-
-**IMPORTANT**: A video that was already matched (in any pair) must NOT be re-used in a fallback search. Mark matched videos as "used" immediately.
+**IMPORTANT**: A video that was already matched (in Step 9 or earlier in Step 10) must NOT be re-used. Mark matched videos as "used" immediately.
 
 ### Step 11: Handle Unmatched Videos
 
-If a video exists on only one platform, or no valid match is found:
-- Treat as a valid **single-platform payout row**
-- Mark as `unpaired`
-- Still include in payout calculation
-- Also add to Exceptions/Tab 3 for review (mark as "unpaired — single platform only")
+After Steps 9 and 10, any video that remains unpaired:
+- **Does NOT receive payout** ($0)
+- Goes to Exceptions tab (Tab 3) with reason: "unpaired — no cross-platform match found"
+- Does NOT appear in the Video Audit tab (Tab 2)
+
+Only successfully paired videos are eligible for payout.
 
 ---
 
@@ -289,8 +292,7 @@ For each **matched pair**:
 - `chosen_views = max(tiktok_latest_views, instagram_latest_views)`
 - Store which platform had the higher views (for audit)
 
-For each **unpaired video**:
-- `chosen_views = latest_views` from the available platform
+Unpaired videos do not receive payout and are excluded from views selection.
 
 ---
 
@@ -356,11 +358,10 @@ Where `floor_millions = floor(effective_views / 1,000,000)`.
 ### Step D: Sum Per Creator
 
 For each creator:
-- `total_payout = sum of all individual video payouts`
-- `qualified_video_count = count of payout units with chosen_views >= 1,000` (a matched pair = 1 payout unit, an unpaired video = 1 payout unit)
+- `total_payout = sum of all individual video payouts` (paired videos only)
+- `qualified_video_count = count of paired payout units with chosen_views >= 1,000`
 - `paired_video_count = number of pairs` (1 pair = count as 1, not 2)
-- `unpaired_video_count = number of standalone unpaired videos`
-- `exception_count = number of exception videos for this creator`
+- `exception_count = number of exception videos for this creator` (includes unpaired)
 
 ---
 
@@ -375,33 +376,31 @@ One row per creator:
 | Column | Description |
 |---|---|
 | Creator Name | From the mapping sheet |
-| Qualified Video Count | Count of **payout units** (paired + unpaired) with `chosen_views >= 1,000`. A matched pair counts as 1 payout unit, an unpaired video counts as 1 payout unit. Example: 1 qualified pair + 1 qualified unpaired = 2. |
+| Qualified Video Count | Count of **paired payout units** with `chosen_views >= 1,000`. Each matched pair = 1 payout unit. |
 | Total Payout | Sum of all per-video payouts for that creator in this period |
 | Paired Video Count | Number of **pairs** (not individual videos). 1 matched TikTok+Instagram pair = 1. |
-| Unpaired Video Count | Number of standalone videos (from either platform) that were not paired |
-| Exception Count | Count of exception videos for this creator |
+| Exception Count | Count of exception videos for this creator (unpaired + other exceptions) |
 
 Sort by Total Payout descending. Format payout as currency, views with comma separators. Bold header row. Auto-fit column widths.
 
 ### Tab 2: Video Audit (one row per payout unit)
 
-One row per **payout unit** — a matched pair is ONE row with both platforms' data side by side. An unpaired video is also one row.
+One row per **payout unit** — each matched pair is ONE row with both platforms' data side by side. Only paired videos appear here.
 
 | Column | Description |
 |---|---|
 | Creator Name | Canonical name |
 | Uploaded At | `uploaded_at` value |
 | Video Length (sec) | Duration in seconds |
-| TikTok Link | `ad_link` for TikTok video (blank if unpaired Instagram) |
-| TikTok Views | `latest_views` for TikTok (blank if unpaired Instagram) |
-| Instagram Link | `ad_link` for Instagram video (blank if unpaired TikTok) |
-| Instagram Views | `latest_views` for Instagram (blank if unpaired TikTok) |
-| Chosen Views | `max(tiktok_views, instagram_views)` or the single platform's views |
+| TikTok Link | `ad_link` for TikTok video |
+| TikTok Views | `latest_views` for TikTok |
+| Instagram Link | `ad_link` for Instagram video |
+| Instagram Views | `latest_views` for Instagram |
+| Chosen Views | `max(tiktok_views, instagram_views)` |
 | Effective Views | After 10M cap (same as chosen_views if under 10M) |
 | Payout Amount | Per-video payout from tier table |
-| Paired / Unpaired | "paired" or "unpaired" |
-| Match Confidence | "high", "medium", or "low" |
-| Match Notes | e.g., "exact match", "fallback match: same length, same upload date, closest created_at", "unpaired — single platform only" |
+| Match Method | "sequence" (Step 9) or "fallback" (Step 10) |
+| Match Notes | e.g., "sequence match", "fallback match: same length, phash confirmed" |
 | Latest Updated At | For freshness reference |
 
 Sort by Creator Name, then Uploaded At.
@@ -424,10 +423,8 @@ Sort by Creator Name, then Uploaded At.
 - "video removed"
 - "missing video length"
 - "missing view data"
-- "no valid cross-platform match found"
-- "unpaired — single platform only"
-- "duplicate row with conflicting values"
-- "ambiguous match (same day + same length + inconsistent counts)"
+- "unpaired — no cross-platform match found"
+- "first frame extraction failed"
 
 ---
 
@@ -451,7 +448,21 @@ A simple, clean web interface with **Polymarket theme** (white background, clean
 | HTTP Client | `httpx` or `requests` | Shortimize API calls |
 | Excel Generation | `openpyxl` | Multi-tab .xlsx creation |
 | Sheet Ingestion | `pandas.read_csv()` or `pandas.read_html()` | Read the published Google Sheet |
+| Video Processing | `yt-dlp` + `ffmpeg` | Download videos and extract first frame for matching |
+| Image Comparison | `imagehash` + `Pillow` | Perceptual hash (phash) for first frame comparison |
 | Deployment | Vercel (frontend) + Railway/Render (backend) | Easy hosting |
+
+### First Frame Extraction Process
+
+For each video that needs matching:
+1. Use `yt-dlp` to download the video from `ad_link` to a temp file
+2. Use `ffmpeg` to extract frame 0 (first frame) as a JPEG
+3. Delete the temp video file immediately
+4. Compute `imagehash.phash()` on the extracted frame
+5. Compare phash values: hamming distance ≤ 10 = same video, > 10 = different video
+
+**Performance**: ~1.8 seconds per video. For 200 videos, ~6 minutes total.
+**Both platforms produce 720x1280 frames** — no normalization needed.
 
 ---
 
@@ -469,26 +480,31 @@ CREATOR_SHEET_CSV_URL=https://docs.google.com/spreadsheets/d/e/2PACX-1vTQcA8MAAh
 
 ## Edge Cases to Handle
 
-1. **Creator has only TikTok or only Instagram** — no matching needed, use that platform's views. Videos are still valid payout units.
+1. **Creator has only TikTok or only Instagram** — all videos go to Exceptions as unpaired. No payout without a cross-platform match.
 2. **Multiple videos on same day, same platform, same creator** — each is a separate video; sequence matching handles this.
-3. **Video posted on one platform but not the other** — standalone payout, no deduction.
+3. **Video posted on one platform but not the other** — goes to Exceptions, no payout.
 4. **Views updated after payout period** — use `latest_views` as-is (Shortimize updates asynchronously).
 5. **Creator handle changes** — mapping sheet is source of truth; unmatched handle → Exceptions.
 6. **Zero qualified videos** — creator still appears in summary with $0 payout.
 7. **Video over 10M views** — cap at 10M for payout calculation, keep original in audit.
-8. **Unequal video counts across platforms** — pair what you can by sequence, leave extras unpaired.
-9. **`video_length` is null** — send to exceptions, cannot match without length.
+8. **Unequal video counts across platforms** — pair what you can, extras go to Exceptions.
+9. **`video_length` is null** — send to Exceptions, cannot match without length.
 10. **Google Sheet URL** — the published URL is in HTML format; either parse HTML with `pandas.read_html()` or convert to CSV export format by modifying the URL.
+11. **First frame extraction fails** (yt-dlp timeout, 403, etc.) — send video to Exceptions with reason "first frame extraction failed". Do not pair without visual confirmation.
+12. **yt-dlp / ffmpeg not installed on server** — fail fast at startup with clear error message listing required system dependencies.
 
 ---
 
 ## Key Assumptions (must be documented)
 
 1. Creator identity is determined by the internal handle mapping file.
-2. Cross-platform matching is based on: same creator → sequence position (sorted by created_at) → confirmed by exact video_length. Fallback uses exact length + same uploaded_at date + closest created_at within ±24h.
-3. Payout uses the higher view count across TikTok and Instagram for the same video.
-4. Videos under 1,000 views do not qualify for payout.
-5. Payout calculation caps views at 10,000,000 per video.
-6. For million-based tiers (6M+), views are **floored**, never rounded up.
-7. Payout is calculated **per video** (per payout unit), then summed per creator.
-8. The date range filter uses `uploaded_at` (what the API supports), but matching/ordering uses `created_at`.
+2. Cross-platform matching uses a two-step process: (a) sequence position sorted by `created_at` + exact `video_length` + first frame phash confirmation, then (b) fallback matching from unmatched pool using exact `video_length` + first frame phash confirmation.
+3. Payout uses the higher view count across TikTok and Instagram for matched pairs.
+4. **Only paired videos (matched across both platforms) are eligible for payout.** Unpaired videos receive $0 and go to Exceptions.
+5. Videos under 1,000 views do not qualify for payout.
+6. Payout calculation caps views at 10,000,000 per video.
+7. For million-based tiers (6M+), views are **floored**, never rounded up.
+8. Payout is calculated **per paired video**, then summed per creator.
+9. The date range filter uses `uploaded_at` (what the API supports), but matching/ordering uses `created_at`.
+10. First frame comparison is the definitive matching signal. Same video = phash distance 0-10. Different video = phash distance 30+.
+11. `yt-dlp` and `ffmpeg` must be available on the server as system dependencies.

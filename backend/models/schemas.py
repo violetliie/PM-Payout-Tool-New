@@ -4,7 +4,7 @@ Pydantic models for the Polymarket Creator Payout Tool.
 Models:
   - Video: A single video from the Shortimize API (raw data + creator_name after mapping)
   - Creator: A creator from the mapping sheet (canonical name + platform handles)
-  - PayoutUnit: One payout row — either a matched TikTok/Instagram pair or a standalone video
+  - PayoutUnit: One payout row — a matched TikTok/Instagram pair (only paired videos get payout)
   - CreatorSummary: Aggregated payout summary per creator (Tab 1 of the Excel output)
   - ExceptionVideo: A video flagged for manual review (Tab 3 of the Excel output)
   - CalculateRequest / CalculateResponse: API request/response models
@@ -47,43 +47,41 @@ class Creator(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# PayoutUnit — one payout row: a matched pair OR an unpaired standalone video
+# PayoutUnit — one payout row: a matched TikTok + Instagram pair
 #
-# For a matched pair:   tiktok_video + instagram_video both populated, paired=True
-# For an unpaired video: one of tiktok_video/instagram_video is None, paired=False
-# chosen_views = max(tiktok, instagram) for pairs, or the single platform's views
+# Only paired videos (both platforms) are eligible for payout.
+# Unpaired videos go to Exceptions with $0 payout.
+#
+# chosen_views = max(tiktok, instagram) for the pair
 # effective_views = min(chosen_views, 10_000_000)
 # payout_amount = tier calculation on effective_views
 # ---------------------------------------------------------------------------
 class PayoutUnit(BaseModel):
     creator_name: str
-    tiktok_video: Optional[Video] = None
-    instagram_video: Optional[Video] = None
+    tiktok_video: Video               # always populated for a valid payout unit
+    instagram_video: Video             # always populated for a valid payout unit
     chosen_views: int = 0
-    effective_views: int = 0  # after 10M cap
+    effective_views: int = 0           # after 10M cap
     best_platform: Optional[str] = None  # which platform had higher views (for audit)
     payout_amount: float = 0.0
-    paired: bool = False  # True = matched pair, False = standalone
-    match_confidence: str = "high"  # "high", "medium", "low"
-    pair_note: Optional[str] = None  # "exact match", "fallback match: same length, same upload date, closest created_at", etc.
+    match_method: str = "sequence"     # "sequence" (Step 9) or "fallback" (Step 10)
+    match_note: Optional[str] = None   # e.g., "sequence match, phash distance: 0"
+    phash_distance: Optional[int] = None  # hamming distance between first frames
 
 
 # ---------------------------------------------------------------------------
 # CreatorSummary — aggregated per-creator summary for Tab 1 of the Excel output
 #
-# Count definitions (per user clarification):
-#   qualified_video_count = number of payout units with chosen_views >= 1,000
-#                           (1 pair = 1 payout unit, 1 unpaired = 1 payout unit)
+# Count definitions:
+#   qualified_video_count = number of paired payout units with chosen_views >= 1,000
 #   paired_video_count    = number of pairs (1 pair = 1, NOT 2)
-#   unpaired_video_count  = number of standalone unpaired payout units
-#   exception_count       = number of exception videos for this creator
+#   exception_count       = number of exception videos for this creator (includes unpaired)
 # ---------------------------------------------------------------------------
 class CreatorSummary(BaseModel):
     creator_name: str
     qualified_video_count: int = 0
     total_payout: float = 0.0
     paired_video_count: int = 0
-    unpaired_video_count: int = 0
     exception_count: int = 0
 
 

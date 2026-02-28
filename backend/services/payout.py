@@ -30,11 +30,9 @@ Where floor_millions = floor(effective_views / 1,000,000).
 No tier above 10M. Views are ALWAYS capped at 10M before applying the formula.
 
 Count definitions (CreatorSummary):
-  qualified_video_count = number of payout units with chosen_views >= 1,000
-                          (1 pair = 1 payout unit, 1 unpaired = 1 payout unit)
-  paired_video_count    = number of payout units where paired=True (1 pair = 1, NOT 2)
-  unpaired_video_count  = number of payout units where paired=False
-  exception_count       = from the exception_counts dict (filled separately)
+  qualified_video_count = number of paired payout units with chosen_views >= 1,000
+  paired_video_count    = number of paired payout units (1 pair = 1, NOT 2)
+  exception_count       = from the exception_counts dict (includes unpaired videos)
 """
 
 import logging
@@ -198,7 +196,7 @@ def process_payouts(payout_units: list[PayoutUnit]) -> list[PayoutUnit]:
             f"  [{unit.creator_name}] "
             f"chosen={unit.chosen_views:,} → effective={unit.effective_views:,} → "
             f"${unit.payout_amount:,.2f} "
-            f"({'paired' if unit.paired else 'unpaired'})"
+            f"(method={unit.match_method})"
         )
 
     logger.info(
@@ -226,8 +224,7 @@ def build_creator_summaries(
     Groups all PayoutUnits by creator_name, then for each creator:
       - qualified_video_count = count of PayoutUnits with chosen_views >= 1,000
       - total_payout          = sum of payout_amount across ALL PayoutUnits
-      - paired_video_count    = count of PayoutUnits where paired=True (1 pair = 1)
-      - unpaired_video_count  = count of PayoutUnits where paired=False
+      - paired_video_count    = count of PayoutUnits (all are paired)
       - exception_count       = from exception_counts dict (defaults to 0)
 
     IMPORTANT: Do NOT accidentally aggregate different creators' payouts together.
@@ -270,9 +267,8 @@ def build_creator_summaries(
         # Sum all payout amounts
         total_payout = sum(u.payout_amount for u in units)
 
-        # Count paired vs unpaired
-        paired_count = sum(1 for u in units if u.paired)
-        unpaired_count = sum(1 for u in units if not u.paired)
+        # All payout units are paired (unpaired go to Exceptions, not PayoutUnits)
+        paired_count = len(units)
 
         # Exception count from the exceptions dict
         exc_count = exception_counts.get(creator_name, 0)
@@ -282,7 +278,6 @@ def build_creator_summaries(
             qualified_video_count=qualified_count,
             total_payout=total_payout,
             paired_video_count=paired_count,
-            unpaired_video_count=unpaired_count,
             exception_count=exc_count,
         )
         summaries.append(summary)
@@ -292,7 +287,6 @@ def build_creator_summaries(
             f"qualified={qualified_count}, "
             f"total=${total_payout:,.2f}, "
             f"paired={paired_count}, "
-            f"unpaired={unpaired_count}, "
             f"exceptions={exc_count}"
         )
 

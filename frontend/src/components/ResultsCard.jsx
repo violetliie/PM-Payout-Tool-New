@@ -5,8 +5,8 @@
  * Shows summary stats + "Download Report" button.
  *
  * Props:
- *   summary  — { total_creators, total_payout, total_videos, paired_count,
- *                unpaired_count, exception_count }
+ *   summary  — { total_creators, total_payout, total_videos_processed,
+ *                total_paired, total_exceptions }
  *   filename — the .xlsx filename for download
  *   onDownload — callback to trigger file download
  */
@@ -52,15 +52,6 @@ export default function ResultsCard({ summary, filename, onDownload }) {
       icon: (
         <svg className="h-5 w-5 text-poly-green" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
           <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-        </svg>
-      ),
-    },
-    {
-      label: "Unpaired",
-      value: summary.total_unpaired?.toLocaleString() ?? "0",
-      icon: (
-        <svg className="h-5 w-5 text-poly-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M9.75 9.75l4.5 4.5m0-4.5l-4.5 4.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
         </svg>
       ),
     },

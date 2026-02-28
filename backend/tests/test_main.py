@@ -100,7 +100,7 @@ MOCK_VIDEOS = [
     # Alice: 1 TT + 1 IG (same length → will pair)
     make_video("alice_tt", "tiktok", 30, 50000, "2026-02-20T10:00:00+00:00", "tt_alice_1"),
     make_video("alice_ig", "instagram", 30, 80000, "2026-02-20T10:30:00+00:00", "ig_alice_1"),
-    # Bob: 1 TT only (will be unpaired)
+    # Bob: 1 TT only (no IG pair → goes to exceptions, not a PayoutUnit)
     make_video("bob_tt", "tiktok", 45, 5000, "2026-02-20T14:00:00+00:00", "tt_bob_1"),
 ]
 
@@ -150,7 +150,6 @@ class TestCalculateHappyPath:
         assert "total_payout" in summary
         assert "total_videos_processed" in summary
         assert "total_paired" in summary
-        assert "total_unpaired" in summary
         assert "total_exceptions" in summary
 
     @patch("main.fetch_creator_mapping")
@@ -159,9 +158,11 @@ class TestCalculateHappyPath:
         """
         With our mock data:
           Alice: 1 pair (TT 50K + IG 80K → chosen=80K → $100)
-          Bob: 1 unpaired TT (5K → $35)
+          Bob: 1 TT only → no pair → exception (no PayoutUnit, no payout)
           api_exceptions: 1 (private_user)
-          match_exceptions: 1 (Bob unpaired)
+          match_exceptions: 1 (Bob's TT unpaired)
+        Bob has 0 PayoutUnits, so build_creator_summaries won't create an
+        entry for him. Only Alice appears in creator summaries.
         """
         mock_fetch_mapping.return_value = (MOCK_CREATORS, MOCK_TT_MAP, MOCK_IG_MAP)
         mock_fetch_videos.return_value = (MOCK_VIDEOS, MOCK_API_EXCEPTIONS)
@@ -173,12 +174,11 @@ class TestCalculateHappyPath:
 
         data = response.json()
         summary = data["summary"]
-        assert summary["total_creators"] == 2       # Alice + Bob
-        assert summary["total_payout"] == 135.0      # $100 + $35
+        assert summary["total_creators"] == 1       # Alice only (Bob has 0 payout units)
+        assert summary["total_payout"] == 100.0      # $100 (Alice's pair only)
         assert summary["total_videos_processed"] == 3 # 3 valid videos in
         assert summary["total_paired"] == 1           # Alice's pair
-        assert summary["total_unpaired"] == 1         # Bob's standalone
-        # Exceptions: 1 api (private) + 1 match (Bob unpaired)
+        # Exceptions: 1 api (private_user) + 1 match (Bob's TT unpaired)
         assert summary["total_exceptions"] == 2
 
     @patch("main.fetch_creator_mapping")
@@ -405,9 +405,12 @@ class TestPipelineExceptionWiring:
     @patch("main.fetch_videos")
     def test_exception_count_in_response(self, mock_fetch_videos, mock_fetch_mapping, client, output_dir):
         """
-        Bob has 1 unpaired TT → match_exceptions includes Bob's video.
-        api_exceptions has 1 private_user (unmappable).
-        Bob's CreatorSummary.exception_count should be 1 (only Bob's unpaired).
+        Bob has 1 TT only → unpaired → exception. Bob has 0 PayoutUnits,
+        so he does NOT appear in Creator Payout Summary (build_creator_summaries
+        only creates entries for creators who have at least one PayoutUnit).
+
+        Alice has 1 paired PayoutUnit with 0 exceptions.
+        api_exceptions has 1 private_user (unmappable → no creator entry).
         """
         mock_fetch_mapping.return_value = (MOCK_CREATORS, MOCK_TT_MAP, MOCK_IG_MAP)
         mock_fetch_videos.return_value = (MOCK_VIDEOS, MOCK_API_EXCEPTIONS)
@@ -428,17 +431,17 @@ class TestPipelineExceptionWiring:
         wb = load_workbook(filepath)
         ws = wb["Creator Payout Summary"]
 
-        # Find rows for Alice and Bob
+        # Find rows for creators
         creators_data = {}
         for row in range(2, ws.max_row + 1):
             name = ws.cell(row=row, column=1).value
-            exc_count = ws.cell(row=row, column=6).value
+            exc_count = ws.cell(row=row, column=5).value
             creators_data[name] = exc_count
 
         # Alice: 0 exceptions (her pair matched fine)
         assert creators_data.get("Alice") == 0
-        # Bob: 1 exception (his TT was unpaired)
-        assert creators_data.get("Bob") == 1
+        # Bob has no PayoutUnits → not in Creator Payout Summary at all
+        assert "Bob" not in creators_data
 
 
 # ===========================================================================
@@ -452,11 +455,13 @@ class TestMultiCreatorPipeline:
     @patch("main.fetch_videos")
     def test_three_creators_various_scenarios(self, mock_fetch_videos, mock_fetch_mapping, client, output_dir):
         """
-        Creator A: 2TT + 2IG (all paired, lengths match)
-        Creator B: 1TT only (unpaired)
-        Creator C: 1IG only (unpaired)
-        + 1 unmapped TT video
+        Creator A: 2TT + 2IG (all paired, lengths match) → 2 PayoutUnits
+        Creator B: 1TT only → unpaired → exception (no PayoutUnit)
+        Creator C: 1IG only → unpaired → exception (no PayoutUnit)
+        + 1 unmapped TT video → exception ("not in creator list")
         + 1 API exception (private)
+
+        Only CreatorA appears in creator summaries (B and C have 0 payout units).
         """
         creators = [
             Creator(creator_name="CreatorA", tiktok_handle="ca_tt", instagram_handle="ca_ig"),
@@ -472,11 +477,11 @@ class TestMultiCreatorPipeline:
             make_video("ca_ig", "instagram", 30, 80000, "2026-02-20T10:30:00+00:00", "ig_ca1"),
             make_video("ca_tt", "tiktok", 45, 10000, "2026-02-20T14:00:00+00:00", "tt_ca2"),
             make_video("ca_ig", "instagram", 45, 15000, "2026-02-20T14:30:00+00:00", "ig_ca2"),
-            # CreatorB: 1 TT only
+            # CreatorB: 1 TT only → exception
             make_video("cb_tt", "tiktok", 60, 5000, "2026-02-20T16:00:00+00:00", "tt_cb1"),
-            # CreatorC: 1 IG only
+            # CreatorC: 1 IG only → exception
             make_video("cc_ig", "instagram", 25, 2500, "2026-02-20T18:00:00+00:00", "ig_cc1"),
-            # Unmapped user
+            # Unmapped user → exception
             make_video("random_user", "tiktok", 20, 999, "2026-02-20T20:00:00+00:00", "tt_rnd"),
         ]
 
@@ -496,15 +501,15 @@ class TestMultiCreatorPipeline:
         data = response.json()
         summary = data["summary"]
 
-        assert summary["total_creators"] == 3
+        # Only CreatorA has payout units → only 1 creator in summaries
+        assert summary["total_creators"] == 1
         assert summary["total_videos_processed"] == 7
-        # CreatorA: 2 pairs, CreatorB: 1 unpaired, CreatorC: 1 unpaired
+        # CreatorA: 2 pairs (B and C are unpaired → exceptions, not payout units)
         assert summary["total_paired"] == 2
-        assert summary["total_unpaired"] == 2
 
         # Payouts: CreatorA pair1: max(50K,80K)=80K→$100, pair2: max(10K,15K)=15K→$50
-        # CreatorB: 5K→$35, CreatorC: 2.5K→$35
-        assert summary["total_payout"] == 220.0  # $100 + $50 + $35 + $35
+        # CreatorB and CreatorC have no PayoutUnits → $0
+        assert summary["total_payout"] == 150.0  # $100 + $50
 
         # Exceptions:
         # 1 api exception (private ca_tt)
@@ -540,7 +545,6 @@ class TestAllExceptions:
         assert data["summary"]["total_creators"] == 0
         assert data["summary"]["total_payout"] == 0
         assert data["summary"]["total_paired"] == 0
-        assert data["summary"]["total_unpaired"] == 0
         assert data["summary"]["total_exceptions"] == 2
 
 

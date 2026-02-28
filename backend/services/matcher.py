@@ -7,36 +7,34 @@ and creator mappings, then performs:
   Step 6:  Deduplicate by ad_link / ad_id (keep most recent latest_updated_at)
   Step 7:  Group videos by creator_name
   Step 8:  Sort each platform list by created_at ascending
-  Step 9:  PRIMARY match — sequence position + exact video_length confirmation
-  Step 10: FALLBACK match — exact length + same uploaded_at date + created_at within ±24h
-  Step 11: Handle unmatched → standalone PayoutUnit + exception
+  Step 9:  PRIMARY match — sequence position + exact video_length + first frame phash
+  Step 10: FALLBACK match — exact length + first frame phash (no date requirements)
+  Step 11: Handle unmatched → Exceptions only (no payout for unpaired videos)
 
 Matching algorithm:
   1. Pair by position: TT#1↔IG#1, TT#2↔IG#2, etc.
-  2. Confirm each pair with video_length: exact match only → high confidence
-  3. If length mismatch (any difference) → reject pair, try FALLBACK on both videos
-  4. FALLBACK: search all unmatched videos on the other platform for
-     exact length AND same uploaded_at date AND closest created_at within ±24h
-  5. Mark matched videos as "used" to prevent re-use
-  6. Remaining unmatched → unpaired standalone payout units
+  2. Confirm each pair with video_length: exact match only
+  3. If lengths match, extract first frames and compare phash (distance ≤ 10 = same video)
+  4. If length mismatch OR phash > 10 → reject pair, both go to unmatched pool
+  5. FALLBACK: search unmatched pool — exact length + phash confirmation
+  6. Mark matched videos as "used" to prevent re-use
+  7. Remaining unmatched → Exceptions (no payout, not in Tab 2)
 
 Output:
-  - list[PayoutUnit]: all payout units (paired + unpaired)
-  - list[ExceptionVideo]: unmapped videos + unpaired videos flagged for review
+  - list[PayoutUnit]: all paired payout units
+  - list[ExceptionVideo]: unmapped + unpaired + extraction-failed videos
 """
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Optional
 
+from PIL import Image
+
 from models.schemas import Video, PayoutUnit, ExceptionVideo
+from services.frame_extractor import get_frame, compare_frames, is_same_video
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-FALLBACK_TIME_WINDOW = timedelta(hours=24)  # ±24h for fallback created_at search
 
 
 # ===========================================================================
@@ -60,8 +58,8 @@ def match_videos(
         instagram_map: {normalized_instagram_handle: creator_name}
 
     Returns:
-        payout_units: All payout units (paired matches + unpaired standalones)
-        exceptions:   Videos that couldn't be mapped or were unpaired
+        payout_units: All paired payout units
+        exceptions:   Videos that couldn't be mapped, paired, or had extraction failures
     """
     logger.info(f"Starting matching pipeline with {len(videos)} videos")
 
@@ -180,12 +178,10 @@ def _deduplicate_videos(videos: list[Video]) -> list[Video]:
     for video in videos:
         key = video.ad_link.strip()
         if not key:
-            # No ad_link — skip this dedup phase for this video
             continue
 
         if key in by_ad_link:
             existing = by_ad_link[key]
-            # Keep the one with more recent latest_updated_at
             if _is_more_recent(video, existing):
                 logger.debug(
                     f"Dedup (ad_link): replacing {existing.username} with "
@@ -195,14 +191,11 @@ def _deduplicate_videos(videos: list[Video]) -> list[Video]:
         else:
             by_ad_link[key] = video
 
-    # Collect unique videos from ad_link dedup
     deduped_by_link = list(by_ad_link.values())
-
-    # Add videos with no ad_link (they weren't in the dict)
     no_link_videos = [v for v in videos if not v.ad_link.strip()]
     intermediate = deduped_by_link + no_link_videos
 
-    # --- Phase 2: Dedup by ad_id (for any remaining duplicates) ---
+    # --- Phase 2: Dedup by ad_id ---
     by_ad_id: dict[str, Video] = {}
     no_id_videos: list[Video] = []
 
@@ -258,8 +251,8 @@ def _match_all_creators(
     Steps 8-11: For each creator, run the matching algorithm
 
     Returns:
-        all_payout_units: Combined payout units from all creators
-        all_exceptions:   Combined exceptions from all creators (unpaired videos)
+        all_payout_units: Combined payout units from all creators (paired only)
+        all_exceptions:   Combined exceptions from all creators
     """
     # ------------------------------------------------------------------
     # Step 7: Group by creator_name
@@ -274,13 +267,17 @@ def _match_all_creators(
     logger.info(f"Step 7: grouped into {len(creator_groups)} creators")
 
     # ------------------------------------------------------------------
+    # Shared frame cache — each video extracted only once across all creators
+    # ------------------------------------------------------------------
+    frame_cache: dict[str, Optional[Image.Image]] = {}
+
+    # ------------------------------------------------------------------
     # Process each creator
     # ------------------------------------------------------------------
     all_payout_units: list[PayoutUnit] = []
     all_exceptions: list[ExceptionVideo] = []
 
     for creator_name, creator_videos in sorted(creator_groups.items()):
-        # Split into platform lists
         tiktok_videos = [v for v in creator_videos if v.platform == "tiktok"]
         instagram_videos = [v for v in creator_videos if v.platform == "instagram"]
 
@@ -290,7 +287,7 @@ def _match_all_creators(
         )
 
         payout_units, exceptions = _match_creator_videos(
-            creator_name, tiktok_videos, instagram_videos
+            creator_name, tiktok_videos, instagram_videos, frame_cache
         )
 
         all_payout_units.extend(payout_units)
@@ -303,20 +300,24 @@ def _match_creator_videos(
     creator_name: str,
     tiktok_videos: list[Video],
     instagram_videos: list[Video],
+    frame_cache: Optional[dict[str, Optional[Image.Image]]] = None,
 ) -> tuple[list[PayoutUnit], list[ExceptionVideo]]:
     """
-    Match videos for a single creator using the sequence + length algorithm.
+    Match videos for a single creator using sequence + length + phash algorithm.
 
     Steps 8-11:
       Step 8:  Sort both lists by created_at ascending
-      Step 9:  PRIMARY — pair by position, confirm with exact video_length
-      Step 10: FALLBACK — exact length + same uploaded_at date + closest created_at within ±24h
-      Step 11: REMAINING — unpaired become standalone payout units + exceptions
+      Step 9:  PRIMARY — pair by position, confirm with exact length + phash
+      Step 10: FALLBACK — unmatched pool, exact length + phash (no date requirements)
+      Step 11: REMAINING — unpaired → Exceptions only (no payout)
 
     Returns:
-        payout_units: All payout units for this creator (paired + unpaired)
-        exceptions:   Unpaired videos flagged for review
+        payout_units: Paired payout units for this creator
+        exceptions:   Unpaired + extraction-failed videos
     """
+    if frame_cache is None:
+        frame_cache = {}
+
     # ------------------------------------------------------------------
     # Step 8: Sort by created_at ascending
     # ------------------------------------------------------------------
@@ -325,126 +326,153 @@ def _match_creator_videos(
 
     # ------------------------------------------------------------------
     # Track which videos have been "used" (matched)
-    # Using index-based tracking: set of indices into the sorted lists
     # ------------------------------------------------------------------
-    tt_used: set[int] = set()   # indices into tiktok_sorted
-    ig_used: set[int] = set()   # indices into instagram_sorted
+    tt_used: set[int] = set()
+    ig_used: set[int] = set()
 
     payout_units: list[PayoutUnit] = []
+    exceptions: list[ExceptionVideo] = []
 
     # ------------------------------------------------------------------
-    # Step 9: PRIMARY matching — sequence position + length confirmation
+    # Step 9: PRIMARY matching — sequence position + length + phash
     # ------------------------------------------------------------------
     min_count = min(len(tiktok_sorted), len(instagram_sorted))
-    fallback_candidates: list[tuple[int, int]] = []  # (tt_idx, ig_idx) pairs that failed
 
     for i in range(min_count):
         tt_video = tiktok_sorted[i]
         ig_video = instagram_sorted[i]
 
+        # Check 1: Exact video_length match
         length_diff = _video_length_diff(tt_video, ig_video)
+        if length_diff is None or length_diff != 0:
+            logger.debug(
+                f"  Pair #{i+1}: length mismatch → unmatched pool "
+                f"(TT={tt_video.video_length}s, IG={ig_video.video_length}s)"
+            )
+            continue  # Both stay unmatched for Step 10
 
-        if length_diff is not None and length_diff == 0:
-            # --- Exact length match → HIGH confidence ---
+        # Check 2: First frame phash comparison
+        tt_frame = get_frame(tt_video.ad_link, frame_cache)
+        ig_frame = get_frame(ig_video.ad_link, frame_cache)
+
+        if tt_frame is None:
+            logger.debug(f"  Pair #{i+1}: TT frame extraction failed")
+            exceptions.append(_build_extraction_failed_exception(tt_video))
+            tt_used.add(i)  # Mark as used so Step 10 skips it
+            continue
+
+        if ig_frame is None:
+            logger.debug(f"  Pair #{i+1}: IG frame extraction failed")
+            exceptions.append(_build_extraction_failed_exception(ig_video))
+            ig_used.add(i)
+            continue
+
+        phash_dist = compare_frames(tt_frame, ig_frame)
+
+        if is_same_video(tt_frame, ig_frame):
+            # Confirmed match
             payout_units.append(_build_paired_unit(
                 creator_name, tt_video, ig_video,
-                confidence="high",
-                note="exact match",
+                method="sequence",
+                note=f"sequence match, phash distance: {phash_dist}",
+                phash_distance=phash_dist,
             ))
             tt_used.add(i)
             ig_used.add(i)
             logger.debug(
-                f"  Pair #{i+1}: exact match "
-                f"(length={tt_video.video_length}s)"
+                f"  Pair #{i+1}: matched (length={tt_video.video_length}s, "
+                f"phash={phash_dist})"
             )
-
         else:
-            # --- Any length mismatch → reject, queue for fallback ---
-            fallback_candidates.append((i, i))
             logger.debug(
-                f"  Pair #{i+1}: length mismatch → fallback "
-                f"(TT={tt_video.video_length}s, IG={ig_video.video_length}s)"
+                f"  Pair #{i+1}: phash mismatch ({phash_dist}) → unmatched pool"
             )
+            # Both stay unmatched for Step 10
 
     # ------------------------------------------------------------------
-    # Step 10: FALLBACK matching for rejected sequence pairs
-    #
-    # IMPORTANT: A previous fallback may have already claimed one or both
-    # videos from a later failed pair.  We must check the used sets BEFORE
-    # running each fallback attempt.
+    # Step 10: FALLBACK — unmatched pool matching (length + phash only)
     # ------------------------------------------------------------------
-    for tt_idx, ig_idx in fallback_candidates:
-        tt_video = tiktok_sorted[tt_idx]
-        ig_video = instagram_sorted[ig_idx]
+    # Collect unmatched videos (not used in Step 9, not failed extraction)
+    unmatched_tt = [
+        (i, tiktok_sorted[i])
+        for i in range(len(tiktok_sorted))
+        if i not in tt_used
+    ]
+    unmatched_ig = [
+        (i, instagram_sorted[i])
+        for i in range(len(instagram_sorted))
+        if i not in ig_used
+    ]
 
-        # Guard: skip videos already claimed by a prior fallback
-        tt_already_used = tt_idx in tt_used
-        ig_already_used = ig_idx in ig_used
+    # Check for extraction failures in unmatched pool first
+    valid_tt = []
+    for idx, video in unmatched_tt:
+        frame = get_frame(video.ad_link, frame_cache)
+        if frame is None:
+            exceptions.append(_build_extraction_failed_exception(video))
+            tt_used.add(idx)
+        else:
+            valid_tt.append((idx, video, frame))
 
-        tt_matched = tt_already_used   # treat as "matched" so Step 11 skips
-        ig_matched = ig_already_used
+    valid_ig = []
+    for idx, video in unmatched_ig:
+        frame = get_frame(video.ad_link, frame_cache)
+        if frame is None:
+            exceptions.append(_build_extraction_failed_exception(video))
+            ig_used.add(idx)
+        else:
+            valid_ig.append((idx, video, frame))
 
-        # --- TikTok fallback search (only if TT video is still free) ---
-        if not tt_already_used:
-            tt_fallback_match = _find_fallback_match(
-                tt_video, instagram_sorted, ig_used
-            )
-            if tt_fallback_match is not None:
-                fb_ig_idx = tt_fallback_match
-                payout_units.append(_build_paired_unit(
-                    creator_name, tt_video, instagram_sorted[fb_ig_idx],
-                    confidence="medium",
-                    note="fallback match: same length, same upload date, closest created_at",
-                ))
-                tt_used.add(tt_idx)
-                ig_used.add(fb_ig_idx)
-                tt_matched = True
-                logger.debug(
-                    f"  Fallback: TT idx={tt_idx} ({tt_video.video_length}s) "
-                    f"→ IG idx={fb_ig_idx} ({instagram_sorted[fb_ig_idx].video_length}s)"
-                )
+    # Build length index for Instagram candidates (for fast lookup)
+    ig_by_length: dict[int, list[tuple[int, Video, Image.Image]]] = {}
+    for idx, video, frame in valid_ig:
+        if video.video_length is not None:
+            length = video.video_length
+            if length not in ig_by_length:
+                ig_by_length[length] = []
+            ig_by_length[length].append((idx, video, frame))
 
-        # --- Instagram fallback search (only if IG video is still free) ---
-        if not ig_already_used:
-            ig_fallback_match = _find_fallback_match(
-                ig_video, tiktok_sorted, tt_used
-            )
-            if ig_fallback_match is not None:
-                fb_tt_idx = ig_fallback_match
-                payout_units.append(_build_paired_unit(
-                    creator_name, tiktok_sorted[fb_tt_idx], ig_video,
-                    confidence="medium",
-                    note="fallback match: same length, same upload date, closest created_at",
-                ))
-                tt_used.add(fb_tt_idx)
-                ig_used.add(ig_idx)
-                ig_matched = True
-                logger.debug(
-                    f"  Fallback: IG idx={ig_idx} ({ig_video.video_length}s) "
-                    f"→ TT idx={fb_tt_idx} ({tiktok_sorted[fb_tt_idx].video_length}s)"
-                )
+    # For each unmatched TikTok, find best phash match among same-length IG
+    for tt_idx, tt_video, tt_frame in valid_tt:
+        if tt_idx in tt_used:
+            continue  # Already matched by a prior fallback iteration
+        if tt_video.video_length is None:
+            continue
 
-        # Log videos that didn't find a fallback
-        if not tt_matched:
+        candidates = ig_by_length.get(tt_video.video_length, [])
+        best_ig_idx = None
+        best_phash = None
+
+        for ig_idx, ig_video, ig_frame in candidates:
+            if ig_idx in ig_used:
+                continue
+
+            phash_dist = compare_frames(tt_frame, ig_frame)
+            if phash_dist <= 10:
+                if best_phash is None or phash_dist < best_phash:
+                    best_ig_idx = ig_idx
+                    best_phash = phash_dist
+
+        if best_ig_idx is not None:
+            ig_video = instagram_sorted[best_ig_idx]
+            payout_units.append(_build_paired_unit(
+                creator_name, tt_video, ig_video,
+                method="fallback",
+                note=f"fallback match: same length, phash distance: {best_phash}",
+                phash_distance=best_phash,
+            ))
+            tt_used.add(tt_idx)
+            ig_used.add(best_ig_idx)
             logger.debug(
-                f"  Fallback failed for TT @{tt_video.username} "
-                f"(length={tt_video.video_length}s) — will be unpaired"
-            )
-        if not ig_matched:
-            logger.debug(
-                f"  Fallback failed for IG @{ig_video.username} "
-                f"(length={ig_video.video_length}s) — will be unpaired"
+                f"  Fallback: TT idx={tt_idx} ↔ IG idx={best_ig_idx} "
+                f"(length={tt_video.video_length}s, phash={best_phash})"
             )
 
     # ------------------------------------------------------------------
-    # Step 11: Handle unmatched videos → standalone payout units + exceptions
+    # Step 11: Handle unmatched videos → Exceptions only (no payout)
     # ------------------------------------------------------------------
-    exceptions: list[ExceptionVideo] = []
-
-    # Unmatched TikTok videos
     for i, tt_video in enumerate(tiktok_sorted):
         if i not in tt_used:
-            payout_units.append(_build_unpaired_unit(creator_name, tt_video))
             exceptions.append(ExceptionVideo(
                 username=tt_video.username,
                 platform=tt_video.platform,
@@ -452,13 +480,11 @@ def _match_creator_videos(
                 created_at=tt_video.created_at,
                 latest_views=tt_video.latest_views,
                 video_length=tt_video.video_length,
-                reason="unpaired — single platform only",
+                reason="unpaired — no cross-platform match found",
             ))
 
-    # Unmatched Instagram videos
     for i, ig_video in enumerate(instagram_sorted):
         if i not in ig_used:
-            payout_units.append(_build_unpaired_unit(creator_name, ig_video))
             exceptions.append(ExceptionVideo(
                 username=ig_video.username,
                 platform=ig_video.platform,
@@ -466,99 +492,47 @@ def _match_creator_videos(
                 created_at=ig_video.created_at,
                 latest_views=ig_video.latest_views,
                 video_length=ig_video.video_length,
-                reason="unpaired — single platform only",
+                reason="unpaired — no cross-platform match found",
             ))
 
     # Log summary for this creator
-    paired_count = sum(1 for pu in payout_units if pu.paired)
-    unpaired_count = sum(1 for pu in payout_units if not pu.paired)
+    paired_count = len(payout_units)
     logger.debug(
         f"  Creator '{creator_name}': "
-        f"{paired_count} paired, {unpaired_count} unpaired, "
-        f"{len(exceptions)} exceptions"
+        f"{paired_count} paired, {len(exceptions)} exceptions"
     )
 
     return payout_units, exceptions
 
 
 # ===========================================================================
-# Fallback matching helper
+# Exception builder
 # ===========================================================================
 
-def _find_fallback_match(
-    source_video: Video,
-    candidate_list: list[Video],
-    used_indices: set[int],
-) -> Optional[int]:
-    """
-    Search for a fallback match for source_video among unused candidates.
-
-    Criteria (per SPEC.md Step 10):
-      1. Exact video_length match
-      2. Same uploaded_at date
-      3. Closest created_at (must be within ±24 hours)
-
-    Args:
-        source_video:   The video looking for a match
-        candidate_list: Sorted list of videos on the OTHER platform
-        used_indices:   Set of indices already matched (skip these)
-
-    Returns:
-        Index into candidate_list of the best fallback match, or None
-    """
-    # Cannot fallback without length, created_at, or uploaded_at
-    if source_video.video_length is None or source_video.created_at is None:
-        return None
-    if source_video.uploaded_at is None:
-        return None
-
-    source_length = source_video.video_length
-    source_time = source_video.created_at
-    source_upload_date = source_video.uploaded_at
-
-    best_idx: Optional[int] = None
-    best_time_diff: Optional[timedelta] = None
-
-    for idx, candidate in enumerate(candidate_list):
-        # Skip already-used candidates
-        if idx in used_indices:
-            continue
-
-        # Skip candidates with missing data
-        if candidate.video_length is None or candidate.created_at is None:
-            continue
-
-        # Skip candidates with missing or different uploaded_at date
-        if candidate.uploaded_at is None or candidate.uploaded_at != source_upload_date:
-            continue
-
-        # Check time window: ±24 hours
-        time_diff = abs(source_time - candidate.created_at)
-        if time_diff > FALLBACK_TIME_WINDOW:
-            continue
-
-        # Check exact length match
-        if candidate.video_length != source_length:
-            continue
-
-        # Track the closest by created_at
-        if best_time_diff is None or time_diff < best_time_diff:
-            best_idx = idx
-            best_time_diff = time_diff
-
-    return best_idx
+def _build_extraction_failed_exception(video: Video) -> ExceptionVideo:
+    """Build an ExceptionVideo for a video whose first frame couldn't be extracted."""
+    return ExceptionVideo(
+        username=video.username,
+        platform=video.platform,
+        ad_link=video.ad_link,
+        created_at=video.created_at,
+        latest_views=video.latest_views,
+        video_length=video.video_length,
+        reason="first frame extraction failed",
+    )
 
 
 # ===========================================================================
-# PayoutUnit construction helpers
+# PayoutUnit construction helper
 # ===========================================================================
 
 def _build_paired_unit(
     creator_name: str,
     tt_video: Video,
     ig_video: Video,
-    confidence: str,
+    method: str,
     note: str,
+    phash_distance: int,
 ) -> PayoutUnit:
     """
     Build a PayoutUnit for a matched TikTok + Instagram pair.
@@ -570,7 +544,6 @@ def _build_paired_unit(
     ig_views = ig_video.latest_views or 0
     chosen_views = max(tt_views, ig_views)
 
-    # Determine which platform had more views
     if tt_views >= ig_views:
         best_platform = "tiktok"
     else:
@@ -582,45 +555,10 @@ def _build_paired_unit(
         instagram_video=ig_video,
         chosen_views=chosen_views,
         best_platform=best_platform,
-        paired=True,
-        match_confidence=confidence,
-        pair_note=note,
+        match_method=method,
+        match_note=note,
+        phash_distance=phash_distance,
     )
-
-
-def _build_unpaired_unit(
-    creator_name: str,
-    video: Video,
-) -> PayoutUnit:
-    """
-    Build a PayoutUnit for an unpaired standalone video.
-
-    chosen_views = the single platform's latest_views
-    """
-    views = video.latest_views or 0
-
-    if video.platform == "tiktok":
-        return PayoutUnit(
-            creator_name=creator_name,
-            tiktok_video=video,
-            instagram_video=None,
-            chosen_views=views,
-            best_platform="tiktok",
-            paired=False,
-            match_confidence="low",
-            pair_note="unpaired — single platform only",
-        )
-    else:
-        return PayoutUnit(
-            creator_name=creator_name,
-            tiktok_video=None,
-            instagram_video=video,
-            chosen_views=views,
-            best_platform="instagram",
-            paired=False,
-            match_confidence="low",
-            pair_note="unpaired — single platform only",
-        )
 
 
 # ===========================================================================
@@ -636,9 +574,6 @@ def _sort_key_created_at(video: Video) -> datetime:
     timezone-aware created_at values from the Shortimize API.
     """
     if video.created_at is None:
-        # Use a far-future UTC datetime so None sorts last.
-        # datetime.max cannot be used directly because it's naive and
-        # comparing naive vs aware datetimes raises TypeError.
         return datetime(9999, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
     return video.created_at
 
@@ -651,60 +586,3 @@ def _video_length_diff(v1: Video, v2: Video) -> Optional[int]:
     if v1.video_length is None or v2.video_length is None:
         return None
     return abs(v1.video_length - v2.video_length)
-
-
-# ===========================================================================
-# Standalone test — run with: cd backend && python -m services.matcher
-# ===========================================================================
-
-if __name__ == "__main__":
-    import sys
-
-    logging.basicConfig(level=logging.DEBUG, format="%(levelname)s: %(message)s")
-    sys.path.insert(0, ".")
-
-    # Quick sanity test with synthetic data
-    from datetime import date as date_type
-
-    def make_video(
-        username: str, platform: str, length: int, views: int,
-        created_at_str: str, ad_link: str = "",
-    ) -> Video:
-        return Video(
-            username=username,
-            platform=platform,
-            ad_link=ad_link or f"https://example.com/{username}/{length}",
-            uploaded_at=date_type(2026, 2, 20),
-            created_at=datetime.fromisoformat(created_at_str),
-            video_length=length,
-            latest_views=views,
-        )
-
-    # Create test videos for one creator
-    test_videos = [
-        # TikTok videos (3)
-        make_video("creator_tt", "tiktok", 30, 5000, "2026-02-20T10:00:00+00:00", "tt1"),
-        make_video("creator_tt", "tiktok", 45, 12000, "2026-02-20T14:00:00+00:00", "tt2"),
-        make_video("creator_tt", "tiktok", 60, 800, "2026-02-21T09:00:00+00:00", "tt3"),
-        # Instagram videos (3)
-        make_video("creator_ig", "instagram", 30, 8000, "2026-02-20T10:30:00+00:00", "ig1"),
-        make_video("creator_ig", "instagram", 45, 3000, "2026-02-20T14:30:00+00:00", "ig2"),
-        make_video("creator_ig", "instagram", 60, 1500, "2026-02-21T09:30:00+00:00", "ig3"),
-    ]
-
-    tt_map = {"creator_tt": "Test Creator"}
-    ig_map = {"creator_ig": "Test Creator"}
-
-    payout_units, exceptions = match_videos(test_videos, tt_map, ig_map)
-
-    print(f"\n{'='*60}")
-    print(f"MATCHER SANITY TEST")
-    print(f"{'='*60}")
-    print(f"Payout units: {len(payout_units)}")
-    print(f"Exceptions:   {len(exceptions)}")
-
-    for pu in payout_units:
-        tt_info = f"TT @{pu.tiktok_video.username} ({pu.tiktok_video.latest_views:,})" if pu.tiktok_video else "—"
-        ig_info = f"IG @{pu.instagram_video.username} ({pu.instagram_video.latest_views:,})" if pu.instagram_video else "—"
-        print(f"  [{pu.match_confidence}] {tt_info} ↔ {ig_info}")
-        print(f"    chosen_views={pu.chosen_views:,}, paired={pu.paired}, note={pu.pair_note}")

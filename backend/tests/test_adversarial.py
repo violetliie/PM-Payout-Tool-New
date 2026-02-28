@@ -29,7 +29,6 @@ from datetime import date, datetime, timezone, timedelta
 from models.schemas import Video, PayoutUnit, CreatorSummary, ExceptionVideo
 from services.matcher import (
     match_videos,
-    _find_fallback_match,
     _deduplicate_videos,
     _map_videos_to_creators,
 )
@@ -153,8 +152,7 @@ class TestTimezoneEdgeCases:
 
         payout_units, exceptions = match_videos([v1, v2, v3, v4], tt_map, ig_map)
         # Should produce 2 pairs with no errors
-        paired = [pu for pu in payout_units if pu.paired]
-        assert len(paired) == 2
+        assert len(payout_units) == 2
 
     def test_created_at_none_sorts_to_end(self):
         """
@@ -184,26 +182,25 @@ class TestTimezoneEdgeCases:
         payout_units, exceptions = match_videos(
             [none_video, normal_video, ig_video], tt_map, ig_map
         )
-        # normal TT pairs with IG; None TT is unpaired
-        paired = [pu for pu in payout_units if pu.paired]
-        unpaired = [pu for pu in payout_units if not pu.paired]
-        assert len(paired) == 1
-        assert len(unpaired) == 1
-        # The unpaired one should be the None-created_at video
-        unpaired_tt = unpaired[0].tiktok_video
-        assert unpaired_tt is not None
-        assert unpaired_tt.created_at is None
+        # normal TT pairs with IG; None TT goes to exceptions (unpaired)
+        assert len(payout_units) == 1
+        # The unpaired None-created_at video should be in exceptions
+        unpaired_exceptions = [
+            e for e in exceptions
+            if e.reason == "unpaired — no cross-platform match found"
+        ]
+        assert len(unpaired_exceptions) == 1
+        assert unpaired_exceptions[0].created_at is None
 
-    def test_fallback_time_window_exactly_24h(self):
+    def test_fallback_matches_regardless_of_time_distance(self):
         """
-        Two videos exactly 24h apart: time_diff == timedelta(hours=24).
-        The code checks `time_diff > FALLBACK_TIME_WINDOW`, so exactly 24h
-        should NOT exceed the window and SHOULD match.
+        Fallback matching uses exact length + phash only, with no time
+        window requirement. Videos 24h apart with same length should match.
         """
         tt_map = {"user1": "Creator"}
         ig_map = {"user1": "Creator"}
 
-        # TT at noon Feb 20, IG at noon Feb 21 -- exactly 24h apart
+        # TT at noon Feb 20, IG at noon Feb 21 -- 24h apart
         tt = make_video(username="user1", platform="tiktok", length=45,
                         created_at_str="2026-02-20T12:00:00+00:00",
                         ad_link="tt1")
@@ -211,7 +208,7 @@ class TestTimezoneEdgeCases:
         ig_wrong_len = make_video(username="user1", platform="instagram", length=60,
                                    created_at_str="2026-02-20T10:00:00+00:00",
                                    ad_link="ig_wrong")
-        # IG that should be the fallback match: same length, same upload date, 24h apart
+        # IG fallback candidate: same length, 24h apart
         ig_fallback = make_video(username="user1", platform="instagram", length=45,
                                   created_at_str="2026-02-21T12:00:00+00:00",
                                   ad_link="ig_fb")
@@ -219,20 +216,19 @@ class TestTimezoneEdgeCases:
         payout_units, _ = match_videos(
             [tt, ig_wrong_len, ig_fallback], tt_map, ig_map
         )
-        # The fallback should succeed: TT(45s) matches IG(45s) at 24h distance
-        paired = [pu for pu in payout_units if pu.paired]
-        assert len(paired) >= 1
+        # Fallback should succeed: TT(45s) matches IG(45s) via exact length + phash
+        assert len(payout_units) >= 1
         # Verify the pair is TT(45s) + IG(45s, fallback)
         found_fallback = any(
-            pu.pair_note and "fallback" in pu.pair_note
-            for pu in paired
+            pu.match_note and "fallback" in pu.match_note
+            for pu in payout_units
         )
-        assert found_fallback, "Exactly 24h apart should still produce a fallback match"
+        assert found_fallback, "Same-length videos should match via fallback regardless of time distance"
 
-    def test_fallback_time_window_24h_plus_1s(self):
+    def test_fallback_matches_even_far_apart_in_time(self):
         """
-        Two videos 24h + 1 second apart: time_diff > FALLBACK_TIME_WINDOW.
-        Should NOT match via fallback.
+        Fallback no longer has a time window. Videos far apart in time
+        but with exact same length should still match via fallback + phash.
         """
         tt_map = {"user1": "Creator"}
         ig_map = {"user1": "Creator"}
@@ -244,20 +240,20 @@ class TestTimezoneEdgeCases:
         ig_wrong = make_video(username="user1", platform="instagram", length=99,
                                created_at_str="2026-02-20T10:00:00+00:00",
                                ad_link="ig_wrong")
-        # IG candidate: same length, same upload date, but 24h + 1s apart
-        ig_too_far = make_video(username="user1", platform="instagram", length=45,
-                                 created_at_str="2026-02-21T12:00:01+00:00",
-                                 ad_link="ig_far")
+        # IG candidate: same length, 24h + 1s apart (should still match)
+        ig_far = make_video(username="user1", platform="instagram", length=45,
+                             created_at_str="2026-02-21T12:00:01+00:00",
+                             ad_link="ig_far")
 
         payout_units, _ = match_videos(
-            [tt, ig_wrong, ig_too_far], tt_map, ig_map
+            [tt, ig_wrong, ig_far], tt_map, ig_map
         )
-        # No fallback match should occur
+        # Fallback should succeed since time distance is irrelevant now
         fallback_pairs = [
             pu for pu in payout_units
-            if pu.paired and pu.pair_note and "fallback" in pu.pair_note
+            if pu.match_note and "fallback" in pu.match_note
         ]
-        assert len(fallback_pairs) == 0, "24h+1s should be outside the fallback window"
+        assert len(fallback_pairs) == 1, "Fallback should match regardless of time distance"
 
 
 # ===========================================================================
@@ -465,15 +461,17 @@ class TestFallbackDoubleBooking:
         ig1 = make_video(username="user1", platform="instagram", length=45,
                          created_at_str="2026-02-20T14:30:00+00:00", ad_link="ig1")
 
-        payout_units, _ = match_videos([tt0, tt1, ig0, ig1], tt_map, ig_map)
+        payout_units, exceptions = match_videos([tt0, tt1, ig0, ig1], tt_map, ig_map)
 
-        # TT[0]+IG[0] should be a high confidence pair
+        # TT[0]+IG[0] should be a sequence pair
         # TT[1] should NOT re-grab IG[0] via fallback
-        paired = [pu for pu in payout_units if pu.paired]
-        unpaired = [pu for pu in payout_units if not pu.paired]
-
-        assert len(paired) == 1  # only TT[0]+IG[0]
-        assert len(unpaired) == 2  # TT[1] and IG[1] are both unpaired
+        assert len(payout_units) == 1  # only TT[0]+IG[0]
+        # TT[1] and IG[1] go to exceptions as unpaired
+        unpaired_exceptions = [
+            e for e in exceptions
+            if e.reason == "unpaired — no cross-platform match found"
+        ]
+        assert len(unpaired_exceptions) == 2
 
     def test_three_tt_two_ig_fallback_ordering(self):
         """
@@ -504,22 +502,21 @@ class TestFallbackDoubleBooking:
         ig1 = make_video(username="user1", platform="instagram", length=60,
                          created_at_str="2026-02-20T12:30:00+00:00", ad_link="ig1")
 
-        payout_units, _ = match_videos(
+        payout_units, exceptions = match_videos(
             [tt0, tt1, tt2, ig0, ig1], tt_map, ig_map
         )
 
-        paired = [pu for pu in payout_units if pu.paired]
-        unpaired = [pu for pu in payout_units if not pu.paired]
-
         # Expect: TT[1]+IG[0] (45s) and TT[2]+IG[1] (60s) via fallback
-        # TT[0] (30s) is unpaired
-        assert len(paired) == 2, f"Expected 2 pairs, got {len(paired)}"
-        assert len(unpaired) == 1, f"Expected 1 unpaired, got {len(unpaired)}"
+        # TT[0] (30s) goes to exceptions as unpaired
+        assert len(payout_units) == 2, f"Expected 2 pairs, got {len(payout_units)}"
 
-        # The unpaired one should be TT[0] (30s, no matching IG)
-        unpaired_video = unpaired[0].tiktok_video
-        assert unpaired_video is not None
-        assert unpaired_video.video_length == 30
+        # The unpaired one should be TT[0] (30s, no matching IG) in exceptions
+        unpaired_exceptions = [
+            e for e in exceptions
+            if e.reason == "unpaired — no cross-platform match found"
+        ]
+        assert len(unpaired_exceptions) == 1, f"Expected 1 unpaired exception, got {len(unpaired_exceptions)}"
+        assert unpaired_exceptions[0].video_length == 30
 
     def test_fallback_both_sides_compete_for_same_candidate(self):
         """
@@ -540,15 +537,15 @@ class TestFallbackDoubleBooking:
         ig0 = make_video(username="user1", platform="instagram", length=30,
                          created_at_str="2026-02-20T10:30:00+00:00", ad_link="ig0")
 
-        payout_units, _ = match_videos([tt0, tt1, ig0], tt_map, ig_map)
+        payout_units, exceptions = match_videos([tt0, tt1, ig0], tt_map, ig_map)
 
-        paired = [pu for pu in payout_units if pu.paired]
-        unpaired = [pu for pu in payout_units if not pu.paired]
-
-        # TT[0]+IG[0] pair by sequence, TT[1] is left unpaired
-        assert len(paired) == 1
-        assert len(unpaired) == 1
-        assert unpaired[0].tiktok_video is not None
+        # TT[0]+IG[0] pair by sequence, TT[1] goes to exceptions as unpaired
+        assert len(payout_units) == 1
+        unpaired_exceptions = [
+            e for e in exceptions
+            if e.reason == "unpaired — no cross-platform match found"
+        ]
+        assert len(unpaired_exceptions) == 1
 
     def test_fallback_ig_video_not_stolen_after_tt_fallback(self):
         """
@@ -572,14 +569,16 @@ class TestFallbackDoubleBooking:
         ig1 = make_video(username="user1", platform="instagram", length=30,
                          created_at_str="2026-02-20T11:00:00+00:00", ad_link="ig1")
 
-        payout_units, _ = match_videos([tt0, tt1, ig0, ig1], tt_map, ig_map)
+        payout_units, exceptions = match_videos([tt0, tt1, ig0, ig1], tt_map, ig_map)
 
-        paired = [pu for pu in payout_units if pu.paired]
-        # TT[0](30s)+IG[1](30s) via TT fallback, IG[0](45s)+TT[1](45s) via IG fallback
+        # TT[0](30s)+IG[1](30s) via fallback, TT[1](45s)+IG[0](45s) via fallback
         # Both should be fallback pairs, total 2 pairs, 0 unpaired
-        assert len(paired) == 2
-        unpaired = [pu for pu in payout_units if not pu.paired]
-        assert len(unpaired) == 0
+        assert len(payout_units) == 2
+        unpaired_exceptions = [
+            e for e in exceptions
+            if e.reason == "unpaired — no cross-platform match found"
+        ]
+        assert len(unpaired_exceptions) == 0
 
 
 # ===========================================================================
@@ -614,13 +613,10 @@ class TestMatcherWithAllIdenticalVideos:
             ))
 
         payout_units, _ = match_videos(videos, tt_map, ig_map)
-        paired = [pu for pu in payout_units if pu.paired]
-        unpaired = [pu for pu in payout_units if not pu.paired]
 
-        assert len(paired) == 5
-        assert len(unpaired) == 0
-        # All should be high confidence (exact match)
-        assert all(pu.match_confidence == "high" for pu in paired)
+        assert len(payout_units) == 5
+        # All should be sequence matches
+        assert all(pu.match_method == "sequence" for pu in payout_units)
 
     def test_all_same_length_different_times(self):
         """
@@ -646,8 +642,7 @@ class TestMatcherWithAllIdenticalVideos:
         ]
 
         payout_units, _ = match_videos(videos, tt_map, ig_map)
-        paired = [pu for pu in payout_units if pu.paired]
-        assert len(paired) == 3
+        assert len(payout_units) == 3
 
     def test_swapped_order_same_length(self):
         """
@@ -673,9 +668,8 @@ class TestMatcherWithAllIdenticalVideos:
         ]
 
         payout_units, _ = match_videos(videos, tt_map, ig_map)
-        paired = [pu for pu in payout_units if pu.paired]
-        assert len(paired) == 2
-        assert all(pu.match_confidence == "high" for pu in paired)
+        assert len(payout_units) == 2
+        assert all(pu.match_method == "sequence" for pu in payout_units)
 
 
 # ===========================================================================
@@ -833,11 +827,15 @@ class TestCreatorSummaryIsolation:
         'Alice' and 'alice' should be treated as separate creators since
         creator_name is set by the mapping and preserved as-is.
         """
+        dummy_tt = make_video(username="u", platform="tiktok", ad_link="tt_dummy")
+        dummy_ig = make_video(username="u", platform="instagram", ad_link="ig_dummy")
         units = [
             PayoutUnit(creator_name="Alice", chosen_views=5000,
-                       payout_amount=35.0, paired=True),
+                       payout_amount=35.0,
+                       tiktok_video=dummy_tt, instagram_video=dummy_ig),
             PayoutUnit(creator_name="alice", chosen_views=50000,
-                       payout_amount=100.0, paired=False),
+                       payout_amount=100.0,
+                       tiktok_video=dummy_tt, instagram_video=dummy_ig),
         ]
 
         summaries = build_creator_summaries(units)
@@ -857,13 +855,16 @@ class TestCreatorSummaryIsolation:
         One creator with 100 payout units, each worth $35 (1K-9999 views).
         Total should be $3,500.
         """
+        dummy_tt = make_video(username="u", platform="tiktok", ad_link="tt_dummy")
+        dummy_ig = make_video(username="u", platform="instagram", ad_link="ig_dummy")
         units = []
         for i in range(100):
             units.append(PayoutUnit(
                 creator_name="Prolific Creator",
                 chosen_views=5000,
                 payout_amount=35.0,
-                paired=True if i % 2 == 0 else False,
+                tiktok_video=dummy_tt,
+                instagram_video=dummy_ig,
             ))
 
         summaries = build_creator_summaries(units)
@@ -871,17 +872,19 @@ class TestCreatorSummaryIsolation:
         summary = summaries[0]
         assert summary.total_payout == 3500.0
         assert summary.qualified_video_count == 100
-        assert summary.paired_video_count == 50
-        assert summary.unpaired_video_count == 50
+        assert summary.paired_video_count == 100
 
     def test_summary_with_only_unqualified_videos(self):
         """
         Creator has 10 videos all with <1K views.
         qualified_video_count=0, total_payout=$0.
         """
+        dummy_tt = make_video(username="u", platform="tiktok", ad_link="tt_dummy")
+        dummy_ig = make_video(username="u", platform="instagram", ad_link="ig_dummy")
         units = [
             PayoutUnit(creator_name="LowViews", chosen_views=500,
-                       payout_amount=0.0, paired=True)
+                       payout_amount=0.0,
+                       tiktok_video=dummy_tt, instagram_video=dummy_ig)
             for _ in range(10)
         ]
 
@@ -897,11 +900,15 @@ class TestCreatorSummaryIsolation:
         reduce payout. A creator with exceptions should still get their
         full payout from qualified payout units.
         """
+        dummy_tt = make_video(username="u", platform="tiktok", ad_link="tt_dummy")
+        dummy_ig = make_video(username="u", platform="instagram", ad_link="ig_dummy")
         units = [
             PayoutUnit(creator_name="Creator", chosen_views=50000,
-                       payout_amount=100.0, paired=True),
+                       payout_amount=100.0,
+                       tiktok_video=dummy_tt, instagram_video=dummy_ig),
             PayoutUnit(creator_name="Creator", chosen_views=100000,
-                       payout_amount=150.0, paired=True),
+                       payout_amount=150.0,
+                       tiktok_video=dummy_tt, instagram_video=dummy_ig),
         ]
         exception_counts = {"Creator": 5}
 
@@ -913,10 +920,15 @@ class TestCreatorSummaryIsolation:
 
     def test_summary_sorted_by_creator_name(self):
         """Summaries should be sorted alphabetically by creator_name."""
+        dummy_tt = make_video(username="u", platform="tiktok", ad_link="tt_dummy")
+        dummy_ig = make_video(username="u", platform="instagram", ad_link="ig_dummy")
         units = [
-            PayoutUnit(creator_name="Zara", chosen_views=5000, payout_amount=35.0),
-            PayoutUnit(creator_name="Alice", chosen_views=5000, payout_amount=35.0),
-            PayoutUnit(creator_name="Mia", chosen_views=5000, payout_amount=35.0),
+            PayoutUnit(creator_name="Zara", chosen_views=5000, payout_amount=35.0,
+                       tiktok_video=dummy_tt, instagram_video=dummy_ig),
+            PayoutUnit(creator_name="Alice", chosen_views=5000, payout_amount=35.0,
+                       tiktok_video=dummy_tt, instagram_video=dummy_ig),
+            PayoutUnit(creator_name="Mia", chosen_views=5000, payout_amount=35.0,
+                       tiktok_video=dummy_tt, instagram_video=dummy_ig),
         ]
 
         summaries = build_creator_summaries(units)
@@ -974,14 +986,19 @@ class TestEmptyAndNullInputs:
         tt_map = {"user1": "Creator"}
 
         payout_units, exceptions = match_videos([minimal_video], tt_map, {})
-        # Should produce 1 unpaired payout unit (no IG to pair with)
-        assert len(payout_units) == 1
-        assert payout_units[0].paired is False
+        # No IG to pair with -> 0 payout units, 1 unpaired exception
+        assert len(payout_units) == 0
+        unpaired_exceptions = [
+            e for e in exceptions
+            if e.reason == "unpaired — no cross-platform match found"
+        ]
+        assert len(unpaired_exceptions) == 1
 
     def test_video_with_none_video_length_sequence_pair(self):
         """
         If either video in a sequence pair has video_length=None, the pair
         should be rejected (length_diff returns None) and go to fallback.
+        Since IG has None length, fallback also can't match. Both go to exceptions.
         """
         tt_map = {"user1": "Creator"}
         ig_map = {"user1": "Creator"}
@@ -997,10 +1014,14 @@ class TestEmptyAndNullInputs:
             latest_views=5000,
         )
 
-        payout_units, _ = match_videos([tt, ig], tt_map, ig_map)
-        # Both should be unpaired since length can't be confirmed
-        unpaired = [pu for pu in payout_units if not pu.paired]
-        assert len(unpaired) == 2
+        payout_units, exceptions = match_videos([tt, ig], tt_map, ig_map)
+        # Both should be unpaired → in exceptions, not in payout_units
+        assert len(payout_units) == 0
+        unpaired_exceptions = [
+            e for e in exceptions
+            if e.reason == "unpaired — no cross-platform match found"
+        ]
+        assert len(unpaired_exceptions) == 2
 
     def test_empty_process_payouts(self):
         """process_payouts with empty list should return empty list."""
@@ -1056,14 +1077,16 @@ class TestLargeScaleStress:
 
         payout_units, exceptions = match_videos(videos, tt_map, ig_map)
 
-        # Per creator: 2 pairs + 1 unpaired TT = 3 payout units
-        # 100 creators * 3 = 300 payout units
-        assert len(payout_units) == 300
+        # Per creator: 2 pairs (payout units), 1 unpaired TT → exception
+        # 100 creators * 2 = 200 payout units
+        assert len(payout_units) == 200
 
-        paired = [pu for pu in payout_units if pu.paired]
-        unpaired = [pu for pu in payout_units if not pu.paired]
-        assert len(paired) == 200   # 100 * 2
-        assert len(unpaired) == 100  # 100 * 1
+        # 100 unpaired TT videos → exceptions
+        unpaired_exceptions = [
+            e for e in exceptions
+            if e.reason == "unpaired — no cross-platform match found"
+        ]
+        assert len(unpaired_exceptions) == 100
 
     def test_single_creator_50_pairs(self):
         """
@@ -1088,9 +1111,8 @@ class TestLargeScaleStress:
             ))
 
         payout_units, _ = match_videos(videos, tt_map, ig_map)
-        paired = [pu for pu in payout_units if pu.paired]
-        assert len(paired) == 50
-        assert all(pu.match_confidence == "high" for pu in paired)
+        assert len(payout_units) == 50
+        assert all(pu.match_method == "sequence" for pu in payout_units)
 
 
 # ===========================================================================
@@ -1116,10 +1138,9 @@ class TestChosenViewsSelection:
                         created_at_str="2026-02-20T10:30:00+00:00", ad_link="ig0")
 
         payout_units, _ = match_videos([tt, ig], tt_map, ig_map)
-        paired = [pu for pu in payout_units if pu.paired]
-        assert len(paired) == 1
-        assert paired[0].chosen_views == 50000
-        assert paired[0].best_platform == "instagram"
+        assert len(payout_units) == 1
+        assert payout_units[0].chosen_views == 50000
+        assert payout_units[0].best_platform == "instagram"
 
     def test_paired_both_none_views(self):
         """
@@ -1147,9 +1168,8 @@ class TestChosenViewsSelection:
         )
 
         payout_units, _ = match_videos([tt, ig], tt_map, ig_map)
-        paired = [pu for pu in payout_units if pu.paired]
-        assert len(paired) == 1
-        assert paired[0].chosen_views == 0
+        assert len(payout_units) == 1
+        assert payout_units[0].chosen_views == 0
 
     def test_paired_equal_views_picks_tiktok_as_best(self):
         """
@@ -1167,15 +1187,14 @@ class TestChosenViewsSelection:
                         created_at_str="2026-02-20T10:30:00+00:00", ad_link="ig0")
 
         payout_units, _ = match_videos([tt, ig], tt_map, ig_map)
-        paired = [pu for pu in payout_units if pu.paired]
-        assert len(paired) == 1
-        assert paired[0].best_platform == "tiktok"
-        assert paired[0].chosen_views == 10000
+        assert len(payout_units) == 1
+        assert payout_units[0].best_platform == "tiktok"
+        assert payout_units[0].chosen_views == 10000
 
-    def test_unpaired_video_views_are_solo(self):
+    def test_unpaired_video_goes_to_exceptions(self):
         """
-        An unpaired TT video: chosen_views = its own views, not max with
-        anything.
+        An unpaired TT video (no IG partner) goes to exceptions,
+        not payout_units. Unpaired videos get no payout.
         """
         tt_map = {"user1": "Creator"}
 
@@ -1183,10 +1202,14 @@ class TestChosenViewsSelection:
                         views=7777,
                         created_at_str="2026-02-20T10:00:00+00:00", ad_link="tt0")
 
-        payout_units, _ = match_videos([tt], tt_map, {})
-        assert len(payout_units) == 1
-        assert payout_units[0].chosen_views == 7777
-        assert payout_units[0].paired is False
+        payout_units, exceptions = match_videos([tt], tt_map, {})
+        assert len(payout_units) == 0
+        unpaired_exceptions = [
+            e for e in exceptions
+            if e.reason == "unpaired — no cross-platform match found"
+        ]
+        assert len(unpaired_exceptions) == 1
+        assert unpaired_exceptions[0].latest_views == 7777
 
 
 # ===========================================================================
@@ -1209,19 +1232,22 @@ class TestSpecRegressions:
         After capping, chosen_views on the PayoutUnit should still be the
         original uncapped value. Only effective_views is capped.
         """
+        dummy_tt = make_video(username="u", platform="tiktok", ad_link="tt_dummy")
+        dummy_ig = make_video(username="u", platform="instagram", ad_link="ig_dummy")
         unit = PayoutUnit(
             creator_name="Creator",
             chosen_views=15_000_000,
-            paired=True,
+            tiktok_video=dummy_tt,
+            instagram_video=dummy_ig,
         )
         processed = process_payouts([unit])
         assert processed[0].chosen_views == 15_000_000  # preserved
         assert processed[0].effective_views == 10_000_000  # capped
 
-    def test_unpaired_video_appears_in_both_payout_units_and_exceptions(self):
+    def test_unpaired_video_appears_only_in_exceptions(self):
         """
-        Every unpaired video should appear in BOTH payout_units (as a
-        standalone unit) AND in exceptions.
+        An unpaired video (no cross-platform match) should appear ONLY
+        in exceptions, NOT in payout_units.
         """
         tt_map = {"user1": "Creator"}
 
@@ -1232,13 +1258,12 @@ class TestSpecRegressions:
 
         payout_units, exceptions = match_videos([tt], tt_map, {})
 
-        # Should be in payout_units as unpaired
-        assert len(payout_units) == 1
-        assert payout_units[0].paired is False
+        # Should NOT be in payout_units (unpaired videos get no payout)
+        assert len(payout_units) == 0
 
-        # Should also be in exceptions
+        # Should be in exceptions
         assert len(exceptions) == 1
-        assert exceptions[0].reason == "unpaired \u2014 single platform only"
+        assert exceptions[0].reason == "unpaired \u2014 no cross-platform match found"
         assert exceptions[0].ad_link == "tt_solo"
 
     def test_unmapped_video_only_in_exceptions_not_payout_units(self):
@@ -1270,15 +1295,15 @@ class TestSpecRegressions:
                         ad_link="tt_case")
 
         payout_units, exceptions = match_videos([tt], tt_map, {})
-        # Should map successfully, not be an exception
-        assert len(payout_units) == 1
-        assert len(exceptions) == 1  # unpaired exception, but NOT "not in creator list"
-        assert payout_units[0].creator_name == "Creator One"
+        # Should map successfully (not "not in creator list"), but unpaired → exception
+        assert len(payout_units) == 0
+        assert len(exceptions) == 1
+        assert exceptions[0].reason == "unpaired — no cross-platform match found"
 
     def test_username_with_leading_trailing_whitespace(self):
         """
         Usernames with leading/trailing whitespace should be stripped
-        before lookup.
+        before lookup. The video maps successfully but is unpaired (no IG).
         """
         tt_map = {"user1": "Creator"}
 
@@ -1287,14 +1312,16 @@ class TestSpecRegressions:
                         ad_link="tt_whitespace")
 
         payout_units, exceptions = match_videos([tt], tt_map, {})
-        assert len(payout_units) == 1
-        assert payout_units[0].creator_name == "Creator"
+        # Mapped successfully (not "not in creator list") but unpaired → exception
+        assert len(payout_units) == 0
+        assert len(exceptions) == 1
+        assert exceptions[0].reason == "unpaired — no cross-platform match found"
 
-    def test_fallback_requires_same_uploaded_at_date(self):
+    def test_fallback_matches_across_different_uploaded_at_dates(self):
         """
-        Fallback match requires same uploaded_at date. Two videos with
-        same length and close created_at but different uploaded_at dates
-        should NOT match via fallback.
+        Fallback matching uses exact length + phash only, with no
+        uploaded_at date requirement. Videos with different uploaded_at
+        dates but same length should match via fallback.
         """
         tt_map = {"user1": "Creator"}
         ig_map = {"user1": "Creator"}
@@ -1308,25 +1335,25 @@ class TestSpecRegressions:
                                    created_at_str="2026-02-20T09:00:00+00:00",
                                    uploaded_at_date=date(2026, 2, 20),
                                    ad_link="ig_wrong")
-        # IG fallback candidate: same length, close time, but DIFFERENT uploaded_at
+        # IG fallback candidate: same length, different uploaded_at
         ig_diff_date = make_video(username="user1", platform="instagram", length=30,
                                    created_at_str="2026-02-20T10:30:00+00:00",
-                                   uploaded_at_date=date(2026, 2, 21),  # different date!
+                                   uploaded_at_date=date(2026, 2, 21),  # different date
                                    ad_link="ig_diff")
 
         payout_units, _ = match_videos([tt, ig_wrong_len, ig_diff_date], tt_map, ig_map)
         fallback_pairs = [
             pu for pu in payout_units
-            if pu.paired and pu.pair_note and "fallback" in pu.pair_note
+            if pu.match_note and "fallback" in pu.match_note
         ]
-        assert len(fallback_pairs) == 0, (
-            "Fallback should not match when uploaded_at dates differ"
+        assert len(fallback_pairs) == 1, (
+            "Fallback should match regardless of uploaded_at date differences"
         )
 
-    def test_fallback_skipped_when_source_has_no_uploaded_at(self):
+    def test_fallback_works_when_source_has_no_uploaded_at(self):
         """
-        If the source video has uploaded_at=None, fallback is skipped
-        entirely (_find_fallback_match returns None early).
+        Fallback uses exact length + phash only. uploaded_at is not checked,
+        so even a video with uploaded_at=None can match via fallback.
         """
         tt_map = {"user1": "Creator"}
         ig_map = {"user1": "Creator"}
@@ -1343,7 +1370,7 @@ class TestSpecRegressions:
         ig_wrong = make_video(username="user1", platform="instagram", length=60,
                                created_at_str="2026-02-20T09:00:00+00:00",
                                ad_link="ig_wrong")
-        # IG that would match if fallback ran
+        # IG that should match via fallback (same length, phash passes)
         ig_match = make_video(username="user1", platform="instagram", length=30,
                                created_at_str="2026-02-20T10:30:00+00:00",
                                ad_link="ig_match")
@@ -1351,10 +1378,10 @@ class TestSpecRegressions:
         payout_units, _ = match_videos([tt, ig_wrong, ig_match], tt_map, ig_map)
         fallback_pairs = [
             pu for pu in payout_units
-            if pu.paired and pu.pair_note and "fallback" in pu.pair_note
+            if pu.match_note and "fallback" in pu.match_note
         ]
-        assert len(fallback_pairs) == 0, (
-            "Fallback should be skipped when source has no uploaded_at"
+        assert len(fallback_pairs) == 1, (
+            "Fallback should work even when source has no uploaded_at"
         )
 
     def test_process_payouts_fills_effective_views_and_payout_amount(self):
@@ -1362,10 +1389,13 @@ class TestSpecRegressions:
         process_payouts should fill in both effective_views and
         payout_amount on each PayoutUnit.
         """
+        dummy_tt = make_video(username="u", platform="tiktok", ad_link="tt_dummy")
+        dummy_ig = make_video(username="u", platform="instagram", ad_link="ig_dummy")
         unit = PayoutUnit(
             creator_name="Creator",
             chosen_views=250_000,
-            paired=True,
+            tiktok_video=dummy_tt,
+            instagram_video=dummy_ig,
         )
         assert unit.effective_views == 0
         assert unit.payout_amount == 0.0
@@ -1379,10 +1409,15 @@ class TestSpecRegressions:
         run_payout_pipeline should return payout_units with filled values
         AND matching creator summaries.
         """
+        dummy_tt = make_video(username="u", platform="tiktok", ad_link="tt_dummy")
+        dummy_ig = make_video(username="u", platform="instagram", ad_link="ig_dummy")
         units = [
-            PayoutUnit(creator_name="A", chosen_views=50000, paired=True),
-            PayoutUnit(creator_name="A", chosen_views=100000, paired=True),
-            PayoutUnit(creator_name="B", chosen_views=500, paired=False),
+            PayoutUnit(creator_name="A", chosen_views=50000,
+                       tiktok_video=dummy_tt, instagram_video=dummy_ig),
+            PayoutUnit(creator_name="A", chosen_views=100000,
+                       tiktok_video=dummy_tt, instagram_video=dummy_ig),
+            PayoutUnit(creator_name="B", chosen_views=500,
+                       tiktok_video=dummy_tt, instagram_video=dummy_ig),
         ]
 
         processed, summaries = run_payout_pipeline(units, {"B": 1})
@@ -1412,7 +1447,11 @@ class TestSpecRegressions:
         ig = make_video(username="user1", platform="instagram", length=31,
                         created_at_str="2026-02-20T10:30:00+00:00", ad_link="ig0")
 
-        payout_units, _ = match_videos([tt, ig], tt_map, ig_map)
-        paired = [pu for pu in payout_units if pu.paired]
-        # Should not pair since 30 != 31
-        assert len(paired) == 0
+        payout_units, exceptions = match_videos([tt, ig], tt_map, ig_map)
+        # Should not pair since 30 != 31 (no sequence or fallback match)
+        assert len(payout_units) == 0
+        unpaired_exceptions = [
+            e for e in exceptions
+            if e.reason == "unpaired — no cross-platform match found"
+        ]
+        assert len(unpaired_exceptions) == 2

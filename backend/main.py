@@ -38,6 +38,7 @@ from services.shortimize import fetch_videos
 from services.matcher import match_videos
 from services.payout import run_payout_pipeline
 from services.excel_export import generate_report
+from services.frame_extractor import check_dependencies
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -49,12 +50,32 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Verify system dependencies (checked in startup event, not at import time)
+# ---------------------------------------------------------------------------
+def _check_system_dependencies():
+    """Check that yt-dlp and ffmpeg are available. Called on app startup."""
+    deps_ok, missing_deps = check_dependencies()
+    if not deps_ok:
+        logger.error(
+            f"MISSING SYSTEM DEPENDENCIES: {', '.join(missing_deps)}. "
+            f"Install with: "
+            f"{'pip install yt-dlp' if 'yt-dlp' in missing_deps else ''}"
+            f"{' && ' if len(missing_deps) == 2 else ''}"
+            f"{'brew install ffmpeg (Mac) or apt install ffmpeg (Linux)' if 'ffmpeg' in missing_deps else ''}"
+        )
+        raise RuntimeError(
+            f"Required system dependencies not found: {', '.join(missing_deps)}. "
+            f"Cannot start without yt-dlp and ffmpeg."
+        )
+    logger.info("System dependencies verified: yt-dlp and ffmpeg are available")
+
+# ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
 app = FastAPI(
     title="Polymarket Creator Payout Tool",
     description="Automates payout calculations for short-form video campaigns",
-    version="1.0.0",
+    version="2.0.0",
 )
 
 app.add_middleware(
@@ -64,6 +85,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Run startup checks
+@app.on_event("startup")
+async def startup_event():
+    _check_system_dependencies()
 
 # Ensure output directory exists at startup
 os.makedirs(config.OUTPUT_DIR, exist_ok=True)
@@ -154,7 +180,7 @@ async def calculate_payouts(request: CalculateRequest):
 
     # ------------------------------------------------------------------
     # Step 4: Match videos — Steps 5-11
-    #   (creator mapping → dedup → sequence match → fallback → unpaired)
+    #   (creator mapping → dedup → sequence match + phash → fallback + phash)
     # ------------------------------------------------------------------
     logger.info("Step 4: Running cross-platform matching...")
     payout_units, match_exceptions = match_videos(
@@ -216,15 +242,13 @@ async def calculate_payouts(request: CalculateRequest):
     # ------------------------------------------------------------------
     # Step 8: Build and return response
     # ------------------------------------------------------------------
-    total_paired = sum(1 for u in processed_units if u.paired)
-    total_unpaired = sum(1 for u in processed_units if not u.paired)
+    total_paired = len(processed_units)  # All payout units are paired
 
     summary = {
         "total_creators": len(creator_summaries),
         "total_payout": total_payout,
         "total_videos_processed": len(valid_videos),
         "total_paired": total_paired,
-        "total_unpaired": total_unpaired,
         "total_exceptions": len(all_exceptions),
     }
 

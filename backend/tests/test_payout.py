@@ -37,9 +37,7 @@ from datetime import date, datetime
 def make_payout_unit(
     creator_name: str = "TestCreator",
     chosen_views: int = 5000,
-    paired: bool = True,
     best_platform: str = "tiktok",
-    match_confidence: str = "high",
 ) -> PayoutUnit:
     """Helper to create a PayoutUnit with sensible defaults."""
     tt_video = Video(
@@ -55,7 +53,7 @@ def make_payout_unit(
         uploaded_at=date(2026, 2, 20),
         created_at=datetime(2026, 2, 20, 10, 30, 0),
         video_length=30, latest_views=chosen_views // 2,
-    ) if paired else None
+    )
 
     return PayoutUnit(
         creator_name=creator_name,
@@ -63,9 +61,9 @@ def make_payout_unit(
         instagram_video=ig_video,
         chosen_views=chosen_views,
         best_platform=best_platform,
-        paired=paired,
-        match_confidence=match_confidence,
-        pair_note="exact match" if paired else "unpaired — single platform only",
+        match_method="sequence",
+        match_note="sequence match, phash distance: 0",
+        phash_distance=0,
     )
 
 
@@ -356,7 +354,7 @@ class TestCreatorSummaries:
 
     def test_single_creator_single_video(self):
         """One creator, one video."""
-        unit = make_payout_unit("Alice", chosen_views=35_000, paired=True)
+        unit = make_payout_unit("Alice", chosen_views=35_000)
         unit.payout_amount = 50.0
         unit.effective_views = 35_000
 
@@ -367,15 +365,14 @@ class TestCreatorSummaries:
         assert s.qualified_video_count == 1
         assert s.total_payout == 50.0
         assert s.paired_video_count == 1
-        assert s.unpaired_video_count == 0
         assert s.exception_count == 0
 
     def test_single_creator_multiple_videos(self):
         """One creator with 3 videos → summed payout."""
         units = [
-            make_payout_unit("Bob", chosen_views=35_000, paired=True),    # $50
-            make_payout_unit("Bob", chosen_views=800_000, paired=True),   # $500
-            make_payout_unit("Bob", chosen_views=500, paired=False),      # $0
+            make_payout_unit("Bob", chosen_views=35_000),    # $50
+            make_payout_unit("Bob", chosen_views=800_000),   # $500
+            make_payout_unit("Bob", chosen_views=500),       # $0
         ]
         # Simulate process_payouts
         for u in units:
@@ -388,8 +385,7 @@ class TestCreatorSummaries:
         assert s.creator_name == "Bob"
         assert s.qualified_video_count == 2  # 35K and 800K qualify, 500 doesn't
         assert s.total_payout == 550.0       # $50 + $500 + $0
-        assert s.paired_video_count == 2
-        assert s.unpaired_video_count == 1
+        assert s.paired_video_count == 3
 
     def test_two_creators_isolated(self):
         """
@@ -397,10 +393,10 @@ class TestCreatorSummaries:
         CRITICAL: payouts must NOT be mixed between creators.
         """
         units = [
-            make_payout_unit("Alice", chosen_views=35_000, paired=True),   # $50
-            make_payout_unit("Alice", chosen_views=800_000, paired=False), # $500
-            make_payout_unit("Bob", chosen_views=2_500_000, paired=True),  # $900
-            make_payout_unit("Bob", chosen_views=180_000, paired=True),    # $150
+            make_payout_unit("Alice", chosen_views=35_000),    # $50
+            make_payout_unit("Alice", chosen_views=800_000),   # $500
+            make_payout_unit("Bob", chosen_views=2_500_000),   # $900
+            make_payout_unit("Bob", chosen_views=180_000),     # $150
         ]
         for u in units:
             u.effective_views = calculate_effective_views(u.chosen_views)
@@ -415,21 +411,19 @@ class TestCreatorSummaries:
         # Alice: $50 + $500 = $550
         assert alice.total_payout == 550.0
         assert alice.qualified_video_count == 2
-        assert alice.paired_video_count == 1
-        assert alice.unpaired_video_count == 1
+        assert alice.paired_video_count == 2
 
         # Bob: $900 + $150 = $1,050
         assert bob.total_payout == 1_050.0
         assert bob.qualified_video_count == 2
         assert bob.paired_video_count == 2
-        assert bob.unpaired_video_count == 0
 
     def test_three_creators(self):
         """Three different creators → three separate summaries."""
         units = [
-            make_payout_unit("Alice", chosen_views=5_000, paired=True),
-            make_payout_unit("Bob", chosen_views=50_000, paired=False),
-            make_payout_unit("Charlie", chosen_views=500_000, paired=True),
+            make_payout_unit("Alice", chosen_views=5_000),
+            make_payout_unit("Bob", chosen_views=50_000),
+            make_payout_unit("Charlie", chosen_views=500_000),
         ]
         for u in units:
             u.effective_views = calculate_effective_views(u.chosen_views)
@@ -442,7 +436,7 @@ class TestCreatorSummaries:
 
     def test_exception_counts_applied(self):
         """Exception counts from dict should be set on each creator."""
-        unit = make_payout_unit("Alice", chosen_views=5_000, paired=True)
+        unit = make_payout_unit("Alice", chosen_views=5_000)
         unit.payout_amount = 35.0
         unit.effective_views = 5_000
 
@@ -452,7 +446,7 @@ class TestCreatorSummaries:
 
     def test_exception_counts_default_zero(self):
         """Creators not in exception_counts dict default to 0."""
-        unit = make_payout_unit("Alice", chosen_views=5_000, paired=True)
+        unit = make_payout_unit("Alice", chosen_views=5_000)
         unit.payout_amount = 35.0
         unit.effective_views = 5_000
 
@@ -467,8 +461,8 @@ class TestCreatorSummaries:
     def test_all_unqualified(self):
         """Creator with all videos under 1K views → qualified=0, payout=$0."""
         units = [
-            make_payout_unit("Zero", chosen_views=500, paired=True),
-            make_payout_unit("Zero", chosen_views=999, paired=False),
+            make_payout_unit("Zero", chosen_views=500),
+            make_payout_unit("Zero", chosen_views=999),
         ]
         for u in units:
             u.effective_views = calculate_effective_views(u.chosen_views)
@@ -479,8 +473,7 @@ class TestCreatorSummaries:
         s = summaries[0]
         assert s.qualified_video_count == 0
         assert s.total_payout == 0.0
-        assert s.paired_video_count == 1
-        assert s.unpaired_video_count == 1
+        assert s.paired_video_count == 2
 
     def test_qualified_counts_only_above_threshold(self):
         """
@@ -490,9 +483,9 @@ class TestCreatorSummaries:
           - 1,000 views → qualified ($35)
         """
         units = [
-            make_payout_unit("Mix", chosen_views=5_000, paired=True),
-            make_payout_unit("Mix", chosen_views=999, paired=False),
-            make_payout_unit("Mix", chosen_views=1_000, paired=False),
+            make_payout_unit("Mix", chosen_views=5_000),
+            make_payout_unit("Mix", chosen_views=999),
+            make_payout_unit("Mix", chosen_views=1_000),
         ]
         for u in units:
             u.effective_views = calculate_effective_views(u.chosen_views)
@@ -509,9 +502,9 @@ class TestCreatorSummaries:
         3 paired PayoutUnits → paired_video_count = 3.
         """
         units = [
-            make_payout_unit("Counter", chosen_views=5_000, paired=True),
-            make_payout_unit("Counter", chosen_views=10_000, paired=True),
-            make_payout_unit("Counter", chosen_views=50_000, paired=True),
+            make_payout_unit("Counter", chosen_views=5_000),
+            make_payout_unit("Counter", chosen_views=10_000),
+            make_payout_unit("Counter", chosen_views=50_000),
         ]
         for u in units:
             u.effective_views = calculate_effective_views(u.chosen_views)
@@ -519,14 +512,13 @@ class TestCreatorSummaries:
 
         summaries = build_creator_summaries(units)
         assert summaries[0].paired_video_count == 3
-        assert summaries[0].unpaired_video_count == 0
 
     def test_summaries_sorted_by_name(self):
         """Summaries should be sorted alphabetically by creator_name."""
         units = [
-            make_payout_unit("Zoe", chosen_views=5_000, paired=True),
-            make_payout_unit("Alice", chosen_views=5_000, paired=True),
-            make_payout_unit("Mike", chosen_views=5_000, paired=True),
+            make_payout_unit("Zoe", chosen_views=5_000),
+            make_payout_unit("Alice", chosen_views=5_000),
+            make_payout_unit("Mike", chosen_views=5_000),
         ]
         for u in units:
             u.effective_views = 5_000
@@ -547,9 +539,9 @@ class TestRunPayoutPipeline:
     def test_basic_pipeline(self):
         """Full pipeline: process payouts + build summaries."""
         units = [
-            make_payout_unit("Alice", chosen_views=35_000, paired=True),
-            make_payout_unit("Alice", chosen_views=800_000, paired=False),
-            make_payout_unit("Bob", chosen_views=2_500_000, paired=True),
+            make_payout_unit("Alice", chosen_views=35_000),
+            make_payout_unit("Alice", chosen_views=800_000),
+            make_payout_unit("Bob", chosen_views=2_500_000),
         ]
 
         processed, summaries = run_payout_pipeline(units)
@@ -569,7 +561,7 @@ class TestRunPayoutPipeline:
     def test_pipeline_with_exception_counts(self):
         """Pipeline passes exception_counts through to summaries."""
         units = [
-            make_payout_unit("Alice", chosen_views=5_000, paired=True),
+            make_payout_unit("Alice", chosen_views=5_000),
         ]
         exc = {"Alice": 2}
 
@@ -599,22 +591,22 @@ class TestMultiCreatorRealistic:
     Verifies per-creator isolation of payout sums.
 
     Creator A: 1 paired (50K views → $100) + 1 paired (2M views → $900)
-      → qualified=2, total=$1,000, paired=2, unpaired=0
+      → qualified=2, total=$1,000, paired=2
 
-    Creator B: 1 paired (500 views → $0) + 1 unpaired (15K views → $50) + 1 exception
-      → qualified=1, total=$50, paired=1, unpaired=1, exceptions=1
+    Creator B: 1 paired (500 views → $0) + 1 paired (15K views → $50) + 1 exception
+      → qualified=1, total=$50, paired=2, exceptions=1
 
-    Creator C: 1 unpaired (12M views → capped → $2,250)
-      → qualified=1, total=$2,250, paired=0, unpaired=1
+    Creator C: 1 paired (12M views → capped → $2,250)
+      → qualified=1, total=$2,250, paired=1
     """
 
     def setup_method(self):
         self.units = [
-            make_payout_unit("Creator A", chosen_views=50_000, paired=True),
-            make_payout_unit("Creator A", chosen_views=2_000_000, paired=True),
-            make_payout_unit("Creator B", chosen_views=500, paired=True),
-            make_payout_unit("Creator B", chosen_views=15_000, paired=False),
-            make_payout_unit("Creator C", chosen_views=12_000_000, paired=False),
+            make_payout_unit("Creator A", chosen_views=50_000),
+            make_payout_unit("Creator A", chosen_views=2_000_000),
+            make_payout_unit("Creator B", chosen_views=500),
+            make_payout_unit("Creator B", chosen_views=15_000),
+            make_payout_unit("Creator C", chosen_views=12_000_000),
         ]
         self.exc_counts = {"Creator B": 1}
 
@@ -640,7 +632,7 @@ class TestMultiCreatorRealistic:
         assert b.qualified_video_count == 1  # only 15K qualifies, 500 doesn't
         assert c.qualified_video_count == 1  # 12M qualifies
 
-    def test_paired_unpaired_counts(self):
+    def test_paired_counts(self):
         _, summaries = run_payout_pipeline(self.units, self.exc_counts)
 
         a = next(s for s in summaries if s.creator_name == "Creator A")
@@ -648,13 +640,8 @@ class TestMultiCreatorRealistic:
         c = next(s for s in summaries if s.creator_name == "Creator C")
 
         assert a.paired_video_count == 2
-        assert a.unpaired_video_count == 0
-
-        assert b.paired_video_count == 1
-        assert b.unpaired_video_count == 1
-
-        assert c.paired_video_count == 0
-        assert c.unpaired_video_count == 1
+        assert b.paired_video_count == 2
+        assert c.paired_video_count == 1
 
     def test_exception_counts(self):
         _, summaries = run_payout_pipeline(self.units, self.exc_counts)
@@ -737,7 +724,7 @@ class TestEdgeCases:
 
     def test_single_creator_zero_qualified(self):
         """Creator appears in summary even with $0 payout."""
-        unit = make_payout_unit("NoViews", chosen_views=100, paired=False)
+        unit = make_payout_unit("NoViews", chosen_views=100)
         unit.effective_views = 100
         unit.payout_amount = 0.0
 

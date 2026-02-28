@@ -129,7 +129,7 @@ def _build_tab1_creator_summary(
 
     Columns:
       Creator Name | Qualified Video Count | Total Payout |
-      Paired Video Count | Unpaired Video Count | Exception Count
+      Paired Video Count | Exception Count
 
     Sorted by Total Payout descending.
     """
@@ -141,7 +141,6 @@ def _build_tab1_creator_summary(
         "Qualified Video Count",
         "Total Payout",
         "Paired Video Count",
-        "Unpaired Video Count",
         "Exception Count",
     ]
     ws.append(headers)
@@ -157,7 +156,6 @@ def _build_tab1_creator_summary(
             s.qualified_video_count,
             s.total_payout,
             s.paired_video_count,
-            s.unpaired_video_count,
             s.exception_count,
         ])
 
@@ -170,8 +168,8 @@ def _build_tab1_creator_summary(
     # Currency format for Total Payout column (column C = index 3)
     _apply_column_format(ws, col_idx=3, fmt=CURRENCY_FORMAT, start_row=2)
 
-    # Number format for count columns (columns B, D, E, F)
-    for col_idx in [2, 4, 5, 6]:
+    # Number format for count columns (columns B, D, E)
+    for col_idx in [2, 4, 5]:
         _apply_column_format(ws, col_idx=col_idx, fmt=NUMBER_FORMAT, start_row=2)
 
     _auto_fit_columns(ws)
@@ -186,16 +184,14 @@ def _build_tab2_video_audit(
     payout_units: list[PayoutUnit],
 ) -> None:
     """
-    Tab 2: One row per payout unit (matched pair = 1 row, unpaired = 1 row).
+    Tab 2: One row per payout unit — only paired videos appear here.
 
     Columns:
       Creator Name | Uploaded At | Video Length (sec) |
       TikTok Link | TikTok Views | Instagram Link | Instagram Views |
       Chosen Views | Effective Views | Payout Amount |
-      Paired/Unpaired | Match Confidence | Match Notes | Latest Updated At
+      Match Method | Match Notes | Latest Updated At
 
-    For paired rows: fill both TikTok and Instagram columns.
-    For unpaired rows: fill only the relevant platform, leave others blank.
     Sorted by Creator Name, then Uploaded At.
     """
     # ------------------------------------------------------------------
@@ -212,8 +208,7 @@ def _build_tab2_video_audit(
         "Chosen Views",
         "Effective Views",
         "Payout Amount",
-        "Paired/Unpaired",
-        "Match Confidence",
+        "Match Method",
         "Match Notes",
         "Latest Updated At",
     ]
@@ -225,27 +220,14 @@ def _build_tab2_video_audit(
     sorted_units = sorted(payout_units, key=_tab2_sort_key)
 
     for pu in sorted_units:
-        # Extract fields from the TikTok video (if present)
-        tt_link = None
-        tt_views = None
-        if pu.tiktok_video:
-            tt_link = pu.tiktok_video.ad_link
-            tt_views = pu.tiktok_video.latest_views
+        # Both videos are always present (only paired units reach Tab 2)
+        tt_link = pu.tiktok_video.ad_link
+        tt_views = pu.tiktok_video.latest_views
+        ig_link = pu.instagram_video.ad_link
+        ig_views = pu.instagram_video.latest_views
 
-        # Extract fields from the Instagram video (if present)
-        ig_link = None
-        ig_views = None
-        if pu.instagram_video:
-            ig_link = pu.instagram_video.ad_link
-            ig_views = pu.instagram_video.latest_views
-
-        # Determine uploaded_at (from whichever video is available, prefer TikTok)
         uploaded_at = _get_uploaded_at(pu)
-
-        # Determine video_length (from whichever video is available, prefer TikTok)
         video_length = _get_video_length(pu)
-
-        # Determine latest_updated_at (most recent from either video)
         latest_updated = _get_latest_updated_at(pu)
 
         ws.append([
@@ -259,9 +241,8 @@ def _build_tab2_video_audit(
             pu.chosen_views,
             pu.effective_views,
             pu.payout_amount,
-            "paired" if pu.paired else "unpaired",
-            pu.match_confidence,
-            pu.pair_note,
+            pu.match_method,
+            pu.match_note,
             _format_datetime(latest_updated),
         ])
 
@@ -475,14 +456,14 @@ if __name__ == "__main__":
     # Create synthetic test data
     summaries = [
         CreatorSummary(
-            creator_name="Alice", qualified_video_count=3,
-            total_payout=650.0, paired_video_count=2,
-            unpaired_video_count=1, exception_count=0,
+            creator_name="Alice", qualified_video_count=2,
+            total_payout=200.0, paired_video_count=2,
+            exception_count=0,
         ),
         CreatorSummary(
             creator_name="Bob", qualified_video_count=1,
-            total_payout=35.0, paired_video_count=0,
-            unpaired_video_count=1, exception_count=2,
+            total_payout=100.0, paired_video_count=1,
+            exception_count=1,
         ),
     ]
 
@@ -508,14 +489,8 @@ if __name__ == "__main__":
         PayoutUnit(
             creator_name="Alice", tiktok_video=tt_video, instagram_video=ig_video,
             chosen_views=80000, effective_views=80000, best_platform="instagram",
-            payout_amount=100.0, paired=True, match_confidence="high",
-            pair_note="exact match",
-        ),
-        PayoutUnit(
-            creator_name="Bob", tiktok_video=tt_video, instagram_video=None,
-            chosen_views=5000, effective_views=5000, best_platform="tiktok",
-            payout_amount=35.0, paired=False, match_confidence="low",
-            pair_note="unpaired — single platform only",
+            payout_amount=100.0, match_method="sequence",
+            match_note="sequence match, phash distance: 0", phash_distance=0,
         ),
     ]
 

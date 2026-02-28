@@ -4,16 +4,23 @@ Comprehensive end-to-end test for the Polymarket Creator Payout Tool.
 Tests the FULL pipeline: match_videos() -> run_payout_pipeline() with 10 fake
 creators and 30+ videos covering every important scenario.
 
+Key behavioral rules:
+  - Only paired videos (both TT + IG matched) become PayoutUnits.
+  - Unpaired videos go to Exceptions only (no payout, no PayoutUnit).
+  - Creators with 0 PayoutUnits do NOT appear in creator summaries.
+  - match_method is "sequence" (Step 9) or "fallback" (Step 10).
+  - Fallback requires exact length + phash only (no date requirements).
+
 Creators and their scenarios:
   1. Creator Alpha   -- Perfect pairing: 3 TT + 3 IG, same lengths, same order
-  2. Creator Beta    -- TikTok only: 2 TT videos, no IG handle mapped
-  3. Creator Gamma   -- Instagram only: 1 IG video below 1K views
+  2. Creator Beta    -- TikTok only: 2 TT videos, no IG -> 0 PayoutUnits, 2 exceptions
+  3. Creator Gamma   -- Instagram only: 1 IG below 1K -> 0 PayoutUnits, 1 exception
   4. Creator Delta   -- Length mismatch -> fallback success: swapped lengths
-  5. Creator Epsilon -- Mixed: 1 pair + 1 unpaired TT
+  5. Creator Epsilon -- Mixed: 1 pair + 1 unpaired TT -> 1 PayoutUnit, 1 exception
   6. Creator Zeta    -- Unmapped: handles not in creator list -> exceptions only
   7. Creator Eta     -- Deduplication: 2 TT with same ad_link, keeps newer
   8. Creator Theta   -- 10M cap: 15M TT views capped to 10M effective
-  9. Creator Iota    -- Fallback fails: different uploaded_at dates + mismatched lengths
+  9. Creator Iota    -- Fallback fails: mismatched lengths, no same-length candidate
   10. Creator Kappa  -- Zero/sub-1K views: 2 pairs, all below threshold -> $0
 
 Pipeline flow:
@@ -149,8 +156,8 @@ class _PipelineResults:
 
         # --------------------------------------------------------------
         # Creator Beta: TikTok Only (2 TT, no IG mapping)
-        # Views: 5K, 2.5K -> both unpaired -> $35 + $35 = $70
-        # Expected: 2 unpaired TT, 2 exceptions
+        # Views: 5K, 2.5K -> both unpaired -> exceptions only
+        # Expected: 0 PayoutUnits, 2 exceptions, no CreatorSummary
         # --------------------------------------------------------------
         videos.append(make_video("beta_tt", "tiktok", 30, 5_000,
                                  "2026-02-20T09:00:00+00:00"))
@@ -159,8 +166,8 @@ class _PipelineResults:
 
         # --------------------------------------------------------------
         # Creator Gamma: Instagram Only (1 IG, no TT mapping)
-        # Views: 500 (below 1K) -> $0 payout
-        # Expected: 1 unpaired IG, 1 exception
+        # Views: 500 (below 1K) -> exception only
+        # Expected: 0 PayoutUnits, 1 exception, no CreatorSummary
         # --------------------------------------------------------------
         videos.append(make_video("gamma_ig", "instagram", 30, 500,
                                  "2026-02-20T08:00:00+00:00"))
@@ -188,10 +195,10 @@ class _PipelineResults:
         # --------------------------------------------------------------
         # Creator Epsilon: Mixed (1 pair + 1 unpaired TT)
         # 2 TT (30s, 45s) + 1 IG (30s)
-        # TT#1 30s <-> IG#1 30s (exact match), TT#2 45s unpaired
+        # TT#1 30s <-> IG#1 30s (sequence match), TT#2 45s -> exception
         # Views: TT(1.5M, 3.5M), IG(2M)
-        # Pair: max(1.5M, 2M)=2M->$900, Unpaired TT: 3.5M->$1100
-        # Total: $2000
+        # Pair: max(1.5M, 2M)=2M->$900, TT#2 45s -> exception (no payout)
+        # Total: $900
         # --------------------------------------------------------------
         videos.append(make_video("epsilon_tt", "tiktok", 30, 1_500_000,
                                  "2026-02-20T10:00:00+00:00"))
@@ -240,13 +247,12 @@ class _PipelineResults:
                                  "2026-02-20T10:30:00+00:00"))
 
         # --------------------------------------------------------------
-        # Creator Iota: Fallback Fails (different uploaded_at + different lengths)
-        # TT: 30s, uploaded Feb 20, created 10:00
-        # IG: 45s, uploaded Feb 21, created 10:30
-        # Sequence match fails (30!=45). Fallback fails because uploaded_at
-        # dates differ (Feb 20 vs Feb 21). Both become unpaired.
+        # Creator Iota: Fallback Fails (mismatched lengths, no same-length candidate)
+        # TT: 30s, IG: 45s — different lengths on each platform
+        # Sequence match fails (30!=45). Fallback also fails because
+        # there is no same-length candidate (30!=45). Both -> exceptions.
         # Views: TT(500K), IG(100K)
-        # Payouts: $500 + $150 = $650
+        # Expected: 0 PayoutUnits, 2 exceptions, no CreatorSummary
         # --------------------------------------------------------------
         videos.append(make_video("iota_tt", "tiktok", 30, 500_000,
                                  "2026-02-20T10:00:00+00:00",
@@ -367,15 +373,17 @@ class TestFullPipelineCreatorCounts(PipelineTestBase):
     """Verify the correct set of creators appears in summaries."""
 
     def test_total_creator_count(self):
-        """Exactly 9 creators should have summaries (Zeta is unmapped)."""
-        assert len(self.results.creator_summaries) == 9
+        """Only creators with PayoutUnits get summaries (6 total).
+
+        Missing: Zeta (unmapped), Beta (TT only), Gamma (IG only), Iota (no match).
+        """
+        assert len(self.results.creator_summaries) == 6
 
     def test_all_creator_names_present(self):
-        """Every mapped creator should appear in the summaries."""
+        """Only creators with paired PayoutUnits appear in summaries."""
         expected_names = {
-            "Creator Alpha", "Creator Beta", "Creator Gamma",
-            "Creator Delta", "Creator Epsilon", "Creator Eta",
-            "Creator Theta", "Creator Iota", "Creator Kappa",
+            "Creator Alpha", "Creator Delta", "Creator Epsilon",
+            "Creator Eta", "Creator Theta", "Creator Kappa",
         }
         actual_names = set(self.results.summary_by_name.keys())
         assert actual_names == expected_names
@@ -383,6 +391,18 @@ class TestFullPipelineCreatorCounts(PipelineTestBase):
     def test_zeta_not_in_summaries(self):
         """Unmapped Creator Zeta should NOT appear in summaries."""
         assert "Creator Zeta" not in self.results.summary_by_name
+
+    def test_beta_not_in_summaries(self):
+        """Single-platform Creator Beta (TT only) has 0 PayoutUnits, no summary."""
+        assert "Creator Beta" not in self.results.summary_by_name
+
+    def test_gamma_not_in_summaries(self):
+        """Single-platform Creator Gamma (IG only) has 0 PayoutUnits, no summary."""
+        assert "Creator Gamma" not in self.results.summary_by_name
+
+    def test_iota_not_in_summaries(self):
+        """Creator Iota has mismatched lengths, 0 PayoutUnits, no summary."""
+        assert "Creator Iota" not in self.results.summary_by_name
 
 
 # ## =======================================================================
@@ -392,7 +412,7 @@ class TestFullPipelineCreatorCounts(PipelineTestBase):
 class TestFullPipelineAlpha(PipelineTestBase):
     """
     Creator Alpha: 3 TT + 3 IG, all same lengths in same sequence.
-    All 3 pairs should be high-confidence exact matches.
+    All 3 pairs should be sequence matches.
     Payouts: $100 + $50 + $500 = $650.
     """
 
@@ -411,18 +431,13 @@ class TestFullPipelineAlpha(PipelineTestBase):
         summary = self.results.summary_by_name["Creator Alpha"]
         assert summary.paired_video_count == 3
 
-    def test_alpha_unpaired_count(self):
-        """No unpaired videos for Alpha."""
-        summary = self.results.summary_by_name["Creator Alpha"]
-        assert summary.unpaired_video_count == 0
-
-    def test_alpha_payout_units_confidence(self):
-        """All Alpha pairs should have 'high' confidence and 'exact match' note."""
+    def test_alpha_payout_units_match_method(self):
+        """All Alpha pairs should have 'sequence' match_method and appropriate match_note."""
         units = self.results.units_by_creator["Creator Alpha"]
         for unit in units:
-            assert unit.paired is True
-            assert unit.match_confidence == "high"
-            assert unit.pair_note == "exact match"
+            assert unit.match_method == "sequence"
+            assert "sequence match" in unit.match_note
+            assert "phash distance: 0" in unit.match_note
 
 
 # ## =======================================================================
@@ -432,29 +447,29 @@ class TestFullPipelineAlpha(PipelineTestBase):
 class TestFullPipelineBeta(PipelineTestBase):
     """
     Creator Beta: 2 TikTok videos, no Instagram mapping.
-    Both videos are unpaired. Views: 5K, 2.5K -> $35 + $35 = $70.
+    Both videos are unpaired -> exceptions only, no PayoutUnits, no CreatorSummary.
     """
 
-    def test_beta_total_payout(self):
-        """Beta total payout should be $70 (two $35 tiers)."""
-        summary = self.results.summary_by_name["Creator Beta"]
-        assert summary.total_payout == 70.0
-
-    def test_beta_qualified_count(self):
-        """Both videos qualify (5K >= 1K and 2.5K >= 1K)."""
-        summary = self.results.summary_by_name["Creator Beta"]
-        assert summary.qualified_video_count == 2
-
-    def test_beta_paired_unpaired(self):
-        """0 pairs, 2 unpaired."""
-        summary = self.results.summary_by_name["Creator Beta"]
-        assert summary.paired_video_count == 0
-        assert summary.unpaired_video_count == 2
+    def test_beta_no_payout_units(self):
+        """Beta should have no payout units (TT only, no IG to match)."""
+        assert "Creator Beta" not in self.results.units_by_creator
 
     def test_beta_exceptions(self):
-        """Beta should have 2 exceptions (unpaired single platform only)."""
-        summary = self.results.summary_by_name["Creator Beta"]
-        assert summary.exception_count == 2
+        """Beta should have 2 exceptions for unpaired TikTok videos."""
+        beta_exceptions = [
+            e for e in self.results.exceptions
+            if e.username == "beta_tt"
+        ]
+        assert len(beta_exceptions) == 2
+
+    def test_beta_exception_reason(self):
+        """Beta exceptions should have the unpaired reason."""
+        beta_exceptions = [
+            e for e in self.results.exceptions
+            if e.username == "beta_tt"
+        ]
+        for exc in beta_exceptions:
+            assert exc.reason == "unpaired \u2014 no cross-platform match found"
 
 
 # ## =======================================================================
@@ -464,24 +479,28 @@ class TestFullPipelineBeta(PipelineTestBase):
 class TestFullPipelineGamma(PipelineTestBase):
     """
     Creator Gamma: 1 Instagram video with 500 views (below 1K threshold).
-    Payout = $0.
+    Single-platform only -> exception, no PayoutUnit, no CreatorSummary.
     """
 
-    def test_gamma_zero_payout(self):
-        """Gamma payout should be $0 (views below 1K)."""
-        summary = self.results.summary_by_name["Creator Gamma"]
-        assert summary.total_payout == 0.0
+    def test_gamma_no_payout_units(self):
+        """Gamma should have no payout units (IG only, no TT to match)."""
+        assert "Creator Gamma" not in self.results.units_by_creator
 
-    def test_gamma_qualified_count_zero(self):
-        """No qualified videos for Gamma (500 < 1K)."""
-        summary = self.results.summary_by_name["Creator Gamma"]
-        assert summary.qualified_video_count == 0
+    def test_gamma_exception(self):
+        """Gamma should have 1 exception for unpaired Instagram video."""
+        gamma_exceptions = [
+            e for e in self.results.exceptions
+            if e.username == "gamma_ig"
+        ]
+        assert len(gamma_exceptions) == 1
 
-    def test_gamma_unpaired(self):
-        """1 unpaired IG, 0 paired."""
-        summary = self.results.summary_by_name["Creator Gamma"]
-        assert summary.paired_video_count == 0
-        assert summary.unpaired_video_count == 1
+    def test_gamma_exception_reason(self):
+        """Gamma exception should have the unpaired reason."""
+        gamma_exceptions = [
+            e for e in self.results.exceptions
+            if e.username == "gamma_ig"
+        ]
+        assert gamma_exceptions[0].reason == "unpaired \u2014 no cross-platform match found"
 
 
 # ## =======================================================================
@@ -491,7 +510,7 @@ class TestFullPipelineGamma(PipelineTestBase):
 class TestFullPipelineDelta(PipelineTestBase):
     """
     Creator Delta: Lengths swapped in sequence -> primary fails, fallback succeeds.
-    TT(30s,45s) + IG(45s,30s). Fallback matches by exact length + same upload date.
+    TT(30s,45s) + IG(45s,30s). Fallback matches by exact length + phash.
     Fallback pairs: TT[0] 30s <-> IG[1] 30s, TT[1] 45s <-> IG[0] 45s.
     Payouts: max(100K,400K)=400K->$300, max(250K,50K)=250K->$300 = $600.
     """
@@ -501,19 +520,18 @@ class TestFullPipelineDelta(PipelineTestBase):
         summary = self.results.summary_by_name["Creator Delta"]
         assert summary.total_payout == 600.0
 
-    def test_delta_both_pairs_medium_confidence(self):
-        """Both Delta pairs should have 'medium' confidence (fallback match)."""
+    def test_delta_both_pairs_fallback_method(self):
+        """Both Delta pairs should have 'fallback' match_method."""
         units = self.results.units_by_creator["Creator Delta"]
         assert len(units) == 2
         for unit in units:
-            assert unit.paired is True
-            assert unit.match_confidence == "medium"
+            assert unit.match_method == "fallback"
 
     def test_delta_fallback_notes(self):
         """Both Delta pairs should have fallback match notes."""
         units = self.results.units_by_creator["Creator Delta"]
         for unit in units:
-            assert "fallback match" in unit.pair_note
+            assert "fallback match" in unit.match_note
 
 
 # ## =======================================================================
@@ -523,25 +541,33 @@ class TestFullPipelineDelta(PipelineTestBase):
 class TestFullPipelineEpsilon(PipelineTestBase):
     """
     Creator Epsilon: 2 TT (30s, 45s) + 1 IG (30s).
-    TT#1 30s pairs with IG#1 30s (exact match). TT#2 45s is unpaired.
-    Pair: max(1.5M, 2M)=2M->$900. Unpaired: 3.5M->$1100. Total: $2000.
+    TT#1 30s pairs with IG#1 30s (sequence match). TT#2 45s -> exception.
+    Pair: max(1.5M, 2M)=2M->$900. Total: $900 (unpaired TT gets no payout).
     """
 
     def test_epsilon_total_payout(self):
-        """Epsilon total payout should be $2000."""
+        """Epsilon total payout should be $900 (only the paired unit)."""
         summary = self.results.summary_by_name["Creator Epsilon"]
-        assert summary.total_payout == 2000.0
+        assert summary.total_payout == 900.0
 
-    def test_epsilon_paired_unpaired_counts(self):
-        """1 pair, 1 unpaired."""
+    def test_epsilon_paired_count(self):
+        """1 pair only (unpaired TT goes to exceptions, not PayoutUnits)."""
         summary = self.results.summary_by_name["Creator Epsilon"]
         assert summary.paired_video_count == 1
-        assert summary.unpaired_video_count == 1
 
     def test_epsilon_qualified_count(self):
-        """Both payout units qualify (both >= 1K views)."""
+        """1 qualified payout unit (the paired one with 2M views)."""
         summary = self.results.summary_by_name["Creator Epsilon"]
-        assert summary.qualified_video_count == 2
+        assert summary.qualified_video_count == 1
+
+    def test_epsilon_exception_for_unpaired_tt(self):
+        """The unpaired TT#2 (45s) should be in exceptions."""
+        epsilon_exceptions = [
+            e for e in self.results.exceptions
+            if e.username == "epsilon_tt"
+        ]
+        assert len(epsilon_exceptions) == 1
+        assert epsilon_exceptions[0].reason == "unpaired \u2014 no cross-platform match found"
 
 
 # ## =======================================================================
@@ -592,7 +618,6 @@ class TestFullPipelineEta(PipelineTestBase):
         """After dedup, Eta should have exactly 1 paired unit."""
         summary = self.results.summary_by_name["Creator Eta"]
         assert summary.paired_video_count == 1
-        assert summary.unpaired_video_count == 0
 
     def test_eta_payout(self):
         """Eta payout should be $1650 (6M views -> floor(6)=6, 1500+150*(6-5)=1650)."""
@@ -636,7 +661,6 @@ class TestFullPipelineTheta(PipelineTestBase):
         """Theta should be a paired unit."""
         summary = self.results.summary_by_name["Creator Theta"]
         assert summary.paired_video_count == 1
-        assert summary.unpaired_video_count == 0
 
 
 # ## =======================================================================
@@ -645,27 +669,31 @@ class TestFullPipelineTheta(PipelineTestBase):
 
 class TestFullPipelineIota(PipelineTestBase):
     """
-    Creator Iota: TT 30s (Feb 20) + IG 45s (Feb 21).
-    Sequence match fails (30!=45). Fallback fails (different uploaded_at).
-    Both become unpaired.
-    Payouts: TT 500K->$500, IG 100K->$150. Total: $650.
+    Creator Iota: TT 30s + IG 45s — mismatched lengths, no same-length candidate.
+    Sequence match fails (30!=45). Fallback also fails (no same-length candidate).
+    Both -> exceptions. 0 PayoutUnits, no CreatorSummary.
     """
 
-    def test_iota_both_unpaired(self):
-        """Both Iota videos should be unpaired."""
-        summary = self.results.summary_by_name["Creator Iota"]
-        assert summary.paired_video_count == 0
-        assert summary.unpaired_video_count == 2
-
-    def test_iota_payout(self):
-        """Iota total payout should be $650 ($500 + $150)."""
-        summary = self.results.summary_by_name["Creator Iota"]
-        assert summary.total_payout == 650.0
+    def test_iota_no_payout_units(self):
+        """Iota should have no payout units (lengths don't match)."""
+        assert "Creator Iota" not in self.results.units_by_creator
 
     def test_iota_exceptions(self):
         """Iota should have 2 exceptions for unpaired videos."""
-        summary = self.results.summary_by_name["Creator Iota"]
-        assert summary.exception_count == 2
+        iota_exceptions = [
+            e for e in self.results.exceptions
+            if e.username in ("iota_tt", "iota_ig")
+        ]
+        assert len(iota_exceptions) == 2
+
+    def test_iota_exception_reason(self):
+        """Iota exceptions should have the unpaired reason."""
+        iota_exceptions = [
+            e for e in self.results.exceptions
+            if e.username in ("iota_tt", "iota_ig")
+        ]
+        for exc in iota_exceptions:
+            assert exc.reason == "unpaired \u2014 no cross-platform match found"
 
 
 # ## =======================================================================
@@ -693,7 +721,6 @@ class TestFullPipelineKappa(PipelineTestBase):
         """Both units should still be paired despite zero payout."""
         summary = self.results.summary_by_name["Creator Kappa"]
         assert summary.paired_video_count == 2
-        assert summary.unpaired_video_count == 0
 
 
 # ## =======================================================================
@@ -704,18 +731,19 @@ class TestFullPipelineAggregates(PipelineTestBase):
     """
     Cross-creator aggregate assertions.
 
-    Expected totals:
-      Alpha:   $650   (3 pairs, 0 unpaired)
-      Beta:    $70    (0 pairs, 2 unpaired)
-      Gamma:   $0     (0 pairs, 1 unpaired)
-      Delta:   $600   (2 pairs, 0 unpaired)
-      Epsilon: $2000  (1 pair,  1 unpaired)
-      Eta:     $1650  (1 pair,  0 unpaired)
-      Theta:   $2250  (1 pair,  0 unpaired)
-      Iota:    $650   (0 pairs, 2 unpaired)
-      Kappa:   $0     (2 pairs, 0 unpaired)
+    Expected totals (only paired units get PayoutUnits):
+      Alpha:   $650   (3 pairs)
+      Delta:   $600   (2 pairs)
+      Epsilon: $900   (1 pair)
+      Eta:     $1650  (1 pair)
+      Theta:   $2250  (1 pair)
+      Kappa:   $0     (2 pairs)
       -------------------------------------------------
-      Total:   $7870  (10 pairs, 6 unpaired)
+      Total:   $6050  (10 pairs)
+
+    Creators with NO PayoutUnits (not in summaries):
+      Beta, Gamma, Iota (single-platform or no match)
+      Zeta (unmapped)
 
     Exceptions:
       Zeta unmapped:          2
@@ -728,19 +756,14 @@ class TestFullPipelineAggregates(PipelineTestBase):
     """
 
     def test_total_payout_across_all_creators(self):
-        """Sum of all creator payouts should be $7870."""
+        """Sum of all creator payouts should be $6050."""
         total = sum(s.total_payout for s in self.results.creator_summaries)
-        assert total == 7870.0
+        assert total == 6050.0
 
     def test_total_paired_count(self):
         """Total paired count across all creators should be 10."""
         total_paired = sum(s.paired_video_count for s in self.results.creator_summaries)
         assert total_paired == 10
-
-    def test_total_unpaired_count(self):
-        """Total unpaired count across all creators should be 6."""
-        total_unpaired = sum(s.unpaired_video_count for s in self.results.creator_summaries)
-        assert total_unpaired == 6
 
     def test_total_exception_count(self):
         """
@@ -757,36 +780,30 @@ class TestFullPipelineAggregates(PipelineTestBase):
 class TestFullPipelinePairDetails(PipelineTestBase):
     """
     Structural invariants that must hold for ALL payout units regardless
-    of creator or scenario.
+    of creator or scenario. All PayoutUnits are paired (unpaired go to exceptions).
     """
 
-    def test_pair_chosen_views_is_max(self):
-        """For every paired unit, chosen_views == max(tt_views, ig_views)."""
+    def test_all_units_have_both_videos(self):
+        """Every PayoutUnit must have both tiktok_video and instagram_video."""
         for unit in self.results.processed_units:
-            if unit.paired:
-                tt_views = unit.tiktok_video.latest_views or 0
-                ig_views = unit.instagram_video.latest_views or 0
-                expected_chosen = max(tt_views, ig_views)
-                assert unit.chosen_views == expected_chosen, (
-                    f"Paired unit for {unit.creator_name}: "
-                    f"chosen_views={unit.chosen_views} != "
-                    f"max({tt_views}, {ig_views})={expected_chosen}"
-                )
+            assert unit.tiktok_video is not None, (
+                f"Unit for {unit.creator_name} missing tiktok_video"
+            )
+            assert unit.instagram_video is not None, (
+                f"Unit for {unit.creator_name} missing instagram_video"
+            )
 
-    def test_unpaired_chosen_views_is_single(self):
-        """For every unpaired unit, chosen_views == the single platform's views."""
+    def test_chosen_views_is_max_of_both_platforms(self):
+        """For every unit, chosen_views == max(tt_views, ig_views)."""
         for unit in self.results.processed_units:
-            if not unit.paired:
-                if unit.tiktok_video:
-                    expected = unit.tiktok_video.latest_views or 0
-                elif unit.instagram_video:
-                    expected = unit.instagram_video.latest_views or 0
-                else:
-                    pytest.fail(f"Unpaired unit for {unit.creator_name} has no video")
-                assert unit.chosen_views == expected, (
-                    f"Unpaired unit for {unit.creator_name}: "
-                    f"chosen_views={unit.chosen_views} != expected={expected}"
-                )
+            tt_views = unit.tiktok_video.latest_views or 0
+            ig_views = unit.instagram_video.latest_views or 0
+            expected_chosen = max(tt_views, ig_views)
+            assert unit.chosen_views == expected_chosen, (
+                f"Unit for {unit.creator_name}: "
+                f"chosen_views={unit.chosen_views} != "
+                f"max({tt_views}, {ig_views})={expected_chosen}"
+            )
 
     def test_all_payout_amounts_match_tier(self):
         """For every unit, payout_amount matches calculate_payout(calculate_effective_views(chosen_views))."""
@@ -824,24 +841,17 @@ class TestFullPipelinePairDetails(PipelineTestBase):
                 f"{unit.effective_views}"
             )
 
-    def test_paired_units_have_both_videos(self):
-        """Every paired unit must have both tiktok_video and instagram_video."""
+    def test_all_units_have_valid_match_method(self):
+        """Every PayoutUnit must have match_method of 'sequence' or 'fallback'."""
         for unit in self.results.processed_units:
-            if unit.paired:
-                assert unit.tiktok_video is not None, (
-                    f"Paired unit for {unit.creator_name} missing tiktok_video"
-                )
-                assert unit.instagram_video is not None, (
-                    f"Paired unit for {unit.creator_name} missing instagram_video"
-                )
+            assert unit.match_method in ("sequence", "fallback"), (
+                f"Unit for {unit.creator_name}: "
+                f"invalid match_method={unit.match_method}"
+            )
 
-    def test_unpaired_units_have_exactly_one_video(self):
-        """Every unpaired unit must have exactly one of tiktok_video or instagram_video."""
+    def test_all_units_have_match_note(self):
+        """Every PayoutUnit must have a non-empty match_note."""
         for unit in self.results.processed_units:
-            if not unit.paired:
-                has_tt = unit.tiktok_video is not None
-                has_ig = unit.instagram_video is not None
-                assert has_tt != has_ig, (
-                    f"Unpaired unit for {unit.creator_name} should have "
-                    f"exactly one video, got tt={has_tt}, ig={has_ig}"
-                )
+            assert unit.match_note is not None and len(unit.match_note) > 0, (
+                f"Unit for {unit.creator_name}: missing match_note"
+            )

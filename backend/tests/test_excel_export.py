@@ -5,10 +5,11 @@ Tests verify:
   1. FILE GENERATION: file created, correct name, correct path
   2. TAB STRUCTURE: 3 tabs with correct names
   3. TAB 1 — Creator Payout Summary:
-     - Correct headers, row count, sort order (payout desc), data accuracy
+     - Correct headers (5 columns), row count, sort order (payout desc), data accuracy
   4. TAB 2 — Video Audit:
-     - Correct headers, row count, sort order (name then date)
-     - Paired rows have both platforms, unpaired rows have only one
+     - Correct headers (13 columns), row count, sort order (name then date)
+     - All rows have both TikTok + Instagram (paired only)
+     - Match Method and Match Notes columns
   5. TAB 3 — Exceptions:
      - Correct headers, row count, data accuracy
   6. FORMATTING:
@@ -90,38 +91,19 @@ def make_paired_unit(
         chosen_views=max(tt_views, ig_views),
         effective_views=min(max(tt_views, ig_views), 10_000_000),
         best_platform="instagram" if ig_views > tt_views else "tiktok",
-        payout_amount=payout, paired=True,
-        match_confidence="high", pair_note="exact match",
+        payout_amount=payout, match_method="sequence",
+        match_note="sequence match, phash distance: 0", phash_distance=0,
     )
 
 
-def make_unpaired_unit(
-    creator="Bob", platform="tiktok", views=5000, payout=35.0,
-    uploaded_at_date=None, length=30,
-):
-    """Helper to create an unpaired PayoutUnit."""
-    video = make_video(f"{creator.lower()}_tt", platform, length, views,
-                       uploaded_at_date=uploaded_at_date,
-                       ad_link=f"https://{platform}.com/@{creator.lower()}/{views}")
-    return PayoutUnit(
-        creator_name=creator,
-        tiktok_video=video if platform == "tiktok" else None,
-        instagram_video=video if platform == "instagram" else None,
-        chosen_views=views, effective_views=min(views, 10_000_000),
-        best_platform=platform,
-        payout_amount=payout, paired=False,
-        match_confidence="low", pair_note="unpaired — single platform only",
-    )
 
-
-def make_summary(name="Alice", qualified=2, payout=550.0, paired=1, unpaired=1, exceptions=0):
+def make_summary(name="Alice", qualified=2, payout=550.0, paired=1, exceptions=0):
     """Helper to create a CreatorSummary."""
     return CreatorSummary(
         creator_name=name,
         qualified_video_count=qualified,
         total_payout=payout,
         paired_video_count=paired,
-        unpaired_video_count=unpaired,
         exception_count=exceptions,
     )
 
@@ -231,7 +213,7 @@ class TestTab1CreatorSummary:
         headers = [cell.value for cell in ws[1]]
         assert headers == [
             "Creator Name", "Qualified Video Count", "Total Payout",
-            "Paired Video Count", "Unpaired Video Count", "Exception Count",
+            "Paired Video Count", "Exception Count",
         ]
 
     def test_row_count(self, output_dir):
@@ -270,7 +252,7 @@ class TestTab1CreatorSummary:
 
     def test_data_accuracy(self, output_dir):
         summary = make_summary("TestCreator", qualified=3, payout=650.0,
-                               paired=2, unpaired=1, exceptions=1)
+                               paired=2, exceptions=1)
         filepath = generate_report(
             [summary], [], [], date(2026, 2, 20), date(2026, 2, 21), output_dir,
         )
@@ -281,8 +263,7 @@ class TestTab1CreatorSummary:
         assert ws.cell(row=2, column=2).value == 3      # qualified
         assert ws.cell(row=2, column=3).value == 650.0   # payout
         assert ws.cell(row=2, column=4).value == 2       # paired
-        assert ws.cell(row=2, column=5).value == 1       # unpaired
-        assert ws.cell(row=2, column=6).value == 1       # exceptions
+        assert ws.cell(row=2, column=5).value == 1       # exceptions
 
     def test_empty_summaries(self, output_dir):
         """No summaries → just header row."""
@@ -299,7 +280,7 @@ class TestTab1CreatorSummary:
 # ===========================================================================
 
 class TestTab2VideoAudit:
-    """Verify Tab 2 data, headers, paired/unpaired distinction, and sorting."""
+    """Verify Tab 2 data, headers, match metadata, and sorting."""
 
     def test_headers(self, output_dir):
         filepath = generate_report(
@@ -312,8 +293,7 @@ class TestTab2VideoAudit:
             "Creator Name", "Uploaded At", "Video Length (sec)",
             "TikTok Link", "TikTok Views", "Instagram Link", "Instagram Views",
             "Chosen Views", "Effective Views", "Payout Amount",
-            "Paired/Unpaired", "Match Confidence", "Match Notes",
-            "Latest Updated At",
+            "Match Method", "Match Notes", "Latest Updated At",
         ]
 
     def test_paired_row_has_both_platforms(self, output_dir):
@@ -329,35 +309,7 @@ class TestTab2VideoAudit:
         assert ws.cell(row=2, column=5).value == 50000       # TikTok Views
         assert ws.cell(row=2, column=6).value is not None   # Instagram Link
         assert ws.cell(row=2, column=7).value == 80000       # Instagram Views
-        assert ws.cell(row=2, column=11).value == "paired"
-
-    def test_unpaired_tiktok_row(self, output_dir):
-        """Unpaired TikTok row → TikTok columns filled, Instagram blank."""
-        unit = make_unpaired_unit("Bob", "tiktok", views=5000)
-        filepath = generate_report(
-            [], [unit], [], date(2026, 2, 20), date(2026, 2, 21), output_dir,
-        )
-        wb = load_workbook(filepath)
-        ws = wb["Video Audit"]
-        assert ws.cell(row=2, column=4).value is not None   # TikTok Link
-        assert ws.cell(row=2, column=5).value == 5000       # TikTok Views
-        assert ws.cell(row=2, column=6).value is None       # Instagram Link (blank)
-        assert ws.cell(row=2, column=7).value is None       # Instagram Views (blank)
-        assert ws.cell(row=2, column=11).value == "unpaired"
-
-    def test_unpaired_instagram_row(self, output_dir):
-        """Unpaired Instagram row → Instagram columns filled, TikTok blank."""
-        unit = make_unpaired_unit("Carol", "instagram", views=8000)
-        filepath = generate_report(
-            [], [unit], [], date(2026, 2, 20), date(2026, 2, 21), output_dir,
-        )
-        wb = load_workbook(filepath)
-        ws = wb["Video Audit"]
-        assert ws.cell(row=2, column=4).value is None       # TikTok Link (blank)
-        assert ws.cell(row=2, column=5).value is None       # TikTok Views (blank)
-        assert ws.cell(row=2, column=6).value is not None   # Instagram Link
-        assert ws.cell(row=2, column=7).value == 8000       # Instagram Views
-        assert ws.cell(row=2, column=11).value == "unpaired"
+        assert ws.cell(row=2, column=11).value == "sequence" # Match Method
 
     def test_sorted_by_creator_then_date(self, output_dir):
         """Tab 2 sorted by Creator Name asc, then Uploaded At asc."""
@@ -395,19 +347,19 @@ class TestTab2VideoAudit:
         assert ws.cell(row=2, column=10).value == 100.0      # Payout Amount
 
     def test_match_metadata(self, output_dir):
-        """Verify match confidence and notes are written."""
+        """Verify match method and match notes are written."""
         unit = make_paired_unit()
         filepath = generate_report(
             [], [unit], [], date(2026, 2, 20), date(2026, 2, 21), output_dir,
         )
         wb = load_workbook(filepath)
         ws = wb["Video Audit"]
-        assert ws.cell(row=2, column=12).value == "high"         # confidence
-        assert ws.cell(row=2, column=13).value == "exact match"  # notes
+        assert ws.cell(row=2, column=11).value == "sequence"                           # Match Method
+        assert ws.cell(row=2, column=12).value == "sequence match, phash distance: 0"  # Match Notes
 
     def test_row_count(self, output_dir):
         """3 payout units → 1 header + 3 data rows."""
-        units = [make_paired_unit(), make_unpaired_unit(), make_paired_unit("C")]
+        units = [make_paired_unit(), make_paired_unit("Bob"), make_paired_unit("C")]
         filepath = generate_report(
             [], units, [], date(2026, 2, 20), date(2026, 2, 21), output_dir,
         )
@@ -650,9 +602,9 @@ class TestEdgeCases:
             assert wb[ws_name].max_row == 1  # header only
 
     def test_single_creator_single_video(self, output_dir):
-        """Minimal data: 1 creator, 1 video, 0 exceptions."""
-        summary = make_summary("Solo", qualified=1, payout=35.0, paired=0, unpaired=1)
-        unit = make_unpaired_unit("Solo", "tiktok", 5000, 35.0)
+        """Minimal data: 1 creator, 1 paired video, 0 exceptions."""
+        summary = make_summary("Solo", qualified=1, payout=35.0, paired=1)
+        unit = make_paired_unit("Solo", tt_views=5000, ig_views=3000, payout=35.0)
         filepath = generate_report(
             [summary], [unit], [], date(2026, 2, 20), date(2026, 2, 21), output_dir,
         )
@@ -663,7 +615,7 @@ class TestEdgeCases:
 
     def test_zero_payout_creator(self, output_dir):
         """Creator with $0 payout still appears in Tab 1."""
-        summary = make_summary("ZeroGuy", qualified=0, payout=0.0, paired=0, unpaired=1)
+        summary = make_summary("ZeroGuy", qualified=0, payout=0.0, paired=0)
         filepath = generate_report(
             [summary], [], [], date(2026, 2, 20), date(2026, 2, 21), output_dir,
         )
@@ -736,16 +688,6 @@ class TestHelpers:
         result = _get_uploaded_at(unit)
         assert result == unit.tiktok_video.uploaded_at
 
-    def test_get_uploaded_at_unpaired_instagram(self):
-        unit = make_unpaired_unit(platform="instagram")
-        result = _get_uploaded_at(unit)
-        assert result == unit.instagram_video.uploaded_at
-
-    def test_get_uploaded_at_none_videos(self):
-        unit = PayoutUnit(creator_name="X", chosen_views=0)
-        result = _get_uploaded_at(unit)
-        assert result is None
-
     def test_get_video_length_paired(self):
         unit = make_paired_unit(length=45)
         assert _get_video_length(unit) == 45
@@ -755,7 +697,7 @@ class TestHelpers:
         ig = make_video("ig", "instagram", updated_at_dt=datetime(2026, 2, 21, 14, 0))
         unit = PayoutUnit(
             creator_name="Test", tiktok_video=tt, instagram_video=ig,
-            chosen_views=5000, paired=True,
+            chosen_views=5000,
         )
         result = _get_latest_updated_at(unit)
         assert result == datetime(2026, 2, 21, 14, 0)
@@ -788,18 +730,18 @@ class TestHelpers:
 
 class TestFullEndToEnd:
     """
-    Realistic end-to-end: 2 creators, mixed paired/unpaired, exceptions.
+    Realistic end-to-end: 2 creators, paired videos, exceptions.
     Verify complete file is valid and data is correctly placed across all tabs.
     """
 
     def test_realistic_report(self, output_dir):
-        # Creator A: $100 + $500 = $600, 2 paired, 0 unpaired, 0 exceptions
-        # Creator B: $35, 0 paired, 1 unpaired, 1 exception
+        # Creator A: $100 + $500 = $600, 2 paired, 0 exceptions
+        # Creator B: $35, 1 paired, 1 exception
         summaries = [
             make_summary("Creator A", qualified=2, payout=600.0, paired=2,
-                         unpaired=0, exceptions=0),
-            make_summary("Creator B", qualified=1, payout=35.0, paired=0,
-                         unpaired=1, exceptions=1),
+                         exceptions=0),
+            make_summary("Creator B", qualified=1, payout=35.0, paired=1,
+                         exceptions=1),
         ]
 
         units = [
@@ -807,8 +749,8 @@ class TestFullEndToEnd:
                              uploaded_at_date=date(2026, 2, 20)),
             make_paired_unit("Creator A", tt_views=800000, ig_views=300000, payout=500.0,
                              uploaded_at_date=date(2026, 2, 21)),
-            make_unpaired_unit("Creator B", "tiktok", views=5000, payout=35.0,
-                               uploaded_at_date=date(2026, 2, 20)),
+            make_paired_unit("Creator B", tt_views=5000, ig_views=3000, payout=35.0,
+                             uploaded_at_date=date(2026, 2, 20)),
         ]
 
         exceptions = [
