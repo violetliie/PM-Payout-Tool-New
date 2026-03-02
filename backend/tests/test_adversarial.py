@@ -187,7 +187,7 @@ class TestTimezoneEdgeCases:
         # The unpaired None-created_at video should be in exceptions
         unpaired_exceptions = [
             e for e in exceptions
-            if e.reason == "unpaired — no cross-platform match found"
+            if e.reason == "Only posted on one platform"
         ]
         assert len(unpaired_exceptions) == 1
         assert unpaired_exceptions[0].created_at is None
@@ -469,7 +469,7 @@ class TestFallbackDoubleBooking:
         # TT[1] and IG[1] go to exceptions as unpaired
         unpaired_exceptions = [
             e for e in exceptions
-            if e.reason == "unpaired — no cross-platform match found"
+            if e.reason == "Only posted on one platform"
         ]
         assert len(unpaired_exceptions) == 2
 
@@ -513,7 +513,7 @@ class TestFallbackDoubleBooking:
         # The unpaired one should be TT[0] (30s, no matching IG) in exceptions
         unpaired_exceptions = [
             e for e in exceptions
-            if e.reason == "unpaired — no cross-platform match found"
+            if e.reason == "Only posted on one platform"
         ]
         assert len(unpaired_exceptions) == 1, f"Expected 1 unpaired exception, got {len(unpaired_exceptions)}"
         assert unpaired_exceptions[0].video_length == 30
@@ -543,7 +543,7 @@ class TestFallbackDoubleBooking:
         assert len(payout_units) == 1
         unpaired_exceptions = [
             e for e in exceptions
-            if e.reason == "unpaired — no cross-platform match found"
+            if e.reason == "Only posted on one platform"
         ]
         assert len(unpaired_exceptions) == 1
 
@@ -576,7 +576,7 @@ class TestFallbackDoubleBooking:
         assert len(payout_units) == 2
         unpaired_exceptions = [
             e for e in exceptions
-            if e.reason == "unpaired — no cross-platform match found"
+            if e.reason == "Only posted on one platform"
         ]
         assert len(unpaired_exceptions) == 0
 
@@ -962,7 +962,7 @@ class TestEmptyAndNullInputs:
         payout_units, exceptions = match_videos(videos, {}, {})
         assert len(payout_units) == 0
         assert len(exceptions) == 2
-        assert all(e.reason == "not in creator list" for e in exceptions)
+        assert all(e.reason == "Not in creator status list" for e in exceptions)
 
     def test_maps_but_no_videos(self):
         """Creator mappings exist but no videos -> empty results."""
@@ -990,7 +990,7 @@ class TestEmptyAndNullInputs:
         assert len(payout_units) == 0
         unpaired_exceptions = [
             e for e in exceptions
-            if e.reason == "unpaired — no cross-platform match found"
+            if e.reason == "Only posted on one platform"
         ]
         assert len(unpaired_exceptions) == 1
 
@@ -1019,7 +1019,7 @@ class TestEmptyAndNullInputs:
         assert len(payout_units) == 0
         unpaired_exceptions = [
             e for e in exceptions
-            if e.reason == "unpaired — no cross-platform match found"
+            if e.reason == "Only posted on one platform"
         ]
         assert len(unpaired_exceptions) == 2
 
@@ -1084,7 +1084,7 @@ class TestLargeScaleStress:
         # 100 unpaired TT videos → exceptions
         unpaired_exceptions = [
             e for e in exceptions
-            if e.reason == "unpaired — no cross-platform match found"
+            if e.reason == "Only posted on one platform"
         ]
         assert len(unpaired_exceptions) == 100
 
@@ -1206,7 +1206,7 @@ class TestChosenViewsSelection:
         assert len(payout_units) == 0
         unpaired_exceptions = [
             e for e in exceptions
-            if e.reason == "unpaired — no cross-platform match found"
+            if e.reason == "Only posted on one platform"
         ]
         assert len(unpaired_exceptions) == 1
         assert unpaired_exceptions[0].latest_views == 7777
@@ -1263,7 +1263,7 @@ class TestSpecRegressions:
 
         # Should be in exceptions
         assert len(exceptions) == 1
-        assert exceptions[0].reason == "unpaired \u2014 no cross-platform match found"
+        assert exceptions[0].reason == "Only posted on one platform"
         assert exceptions[0].ad_link == "tt_solo"
 
     def test_unmapped_video_only_in_exceptions_not_payout_units(self):
@@ -1281,7 +1281,7 @@ class TestSpecRegressions:
 
         assert len(payout_units) == 0
         assert len(exceptions) == 1
-        assert exceptions[0].reason == "not in creator list"
+        assert exceptions[0].reason == "Not in creator status list"
 
     def test_case_insensitive_username_lookup(self):
         """
@@ -1295,10 +1295,10 @@ class TestSpecRegressions:
                         ad_link="tt_case")
 
         payout_units, exceptions = match_videos([tt], tt_map, {})
-        # Should map successfully (not "not in creator list"), but unpaired → exception
+        # Should map successfully (not "Not in creator status list"), but unpaired → exception
         assert len(payout_units) == 0
         assert len(exceptions) == 1
-        assert exceptions[0].reason == "unpaired — no cross-platform match found"
+        assert exceptions[0].reason == "Only posted on one platform"
 
     def test_username_with_leading_trailing_whitespace(self):
         """
@@ -1312,10 +1312,10 @@ class TestSpecRegressions:
                         ad_link="tt_whitespace")
 
         payout_units, exceptions = match_videos([tt], tt_map, {})
-        # Mapped successfully (not "not in creator list") but unpaired → exception
+        # Mapped successfully (not "Not in creator status list") but unpaired → exception
         assert len(payout_units) == 0
         assert len(exceptions) == 1
-        assert exceptions[0].reason == "unpaired — no cross-platform match found"
+        assert exceptions[0].reason == "Only posted on one platform"
 
     def test_fallback_matches_across_different_uploaded_at_dates(self):
         """
@@ -1434,24 +1434,33 @@ class TestSpecRegressions:
         assert b_summary.total_payout == 0.0
         assert b_summary.exception_count == 1
 
-    def test_exact_length_required_no_tolerance(self):
+    def test_length_tolerance_allows_one_second_diff(self):
         """
-        Sequence matching requires EXACT video_length match (no +/-1s tolerance).
-        30s vs 31s should NOT pair.
+        Sequence matching allows ±1 second tolerance.
+        30s vs 31s SHOULD pair. 30s vs 32s should NOT.
         """
         tt_map = {"user1": "Creator"}
         ig_map = {"user1": "Creator"}
 
+        # ±1 second: 30 vs 31 → should pair
         tt = make_video(username="user1", platform="tiktok", length=30,
                         created_at_str="2026-02-20T10:00:00+00:00", ad_link="tt0")
         ig = make_video(username="user1", platform="instagram", length=31,
                         created_at_str="2026-02-20T10:30:00+00:00", ad_link="ig0")
 
         payout_units, exceptions = match_videos([tt, ig], tt_map, ig_map)
-        # Should not pair since 30 != 31 (no sequence or fallback match)
-        assert len(payout_units) == 0
+        assert len(payout_units) == 1  # 30 vs 31 pairs (within ±1s)
+
+        # >1 second diff: 30 vs 32 → should NOT pair
+        tt2 = make_video(username="user1", platform="tiktok", length=30,
+                         created_at_str="2026-02-20T10:00:00+00:00", ad_link="tt1")
+        ig2 = make_video(username="user1", platform="instagram", length=32,
+                         created_at_str="2026-02-20T10:30:00+00:00", ad_link="ig1")
+
+        payout_units2, exceptions2 = match_videos([tt2, ig2], tt_map, ig_map)
+        assert len(payout_units2) == 0
         unpaired_exceptions = [
-            e for e in exceptions
-            if e.reason == "unpaired — no cross-platform match found"
+            e for e in exceptions2
+            if e.reason == "Only posted on one platform"
         ]
         assert len(unpaired_exceptions) == 2

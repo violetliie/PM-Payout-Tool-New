@@ -92,10 +92,11 @@ class ExceptionVideo(BaseModel):
     username: str
     platform: str
     ad_link: str
+    uploaded_at: Optional[date] = None
     created_at: Optional[datetime] = None
     latest_views: Optional[int] = None
     video_length: Optional[int] = None
-    reason: str  # e.g., "not in creator list", "video marked private", etc.
+    reason: str  # e.g., "Not in creator status list", "Video unavailable", etc.
 
 
 # ---------------------------------------------------------------------------

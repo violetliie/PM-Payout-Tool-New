@@ -209,7 +209,7 @@ class _PipelineResults:
 
         # --------------------------------------------------------------
         # Creator Zeta: Unmapped Videos
-        # Handles NOT in tiktok_map/instagram_map -> exception "not in creator list"
+        # Handles NOT in tiktok_map/instagram_map -> exception "Not in creator status list"
         # No PayoutUnits created
         # --------------------------------------------------------------
         videos.append(make_video("zeta_tt", "tiktok", 30, 10_000,
@@ -469,7 +469,7 @@ class TestFullPipelineBeta(PipelineTestBase):
             if e.username == "beta_tt"
         ]
         for exc in beta_exceptions:
-            assert exc.reason == "unpaired \u2014 no cross-platform match found"
+            assert exc.reason == "Only posted on one platform"
 
 
 # ## =======================================================================
@@ -500,7 +500,7 @@ class TestFullPipelineGamma(PipelineTestBase):
             e for e in self.results.exceptions
             if e.username == "gamma_ig"
         ]
-        assert gamma_exceptions[0].reason == "unpaired \u2014 no cross-platform match found"
+        assert gamma_exceptions[0].reason == "Only posted on one platform"
 
 
 # ## =======================================================================
@@ -567,7 +567,7 @@ class TestFullPipelineEpsilon(PipelineTestBase):
             if e.username == "epsilon_tt"
         ]
         assert len(epsilon_exceptions) == 1
-        assert epsilon_exceptions[0].reason == "unpaired \u2014 no cross-platform match found"
+        assert epsilon_exceptions[0].reason == "Only posted on one platform"
 
 
 # ## =======================================================================
@@ -596,7 +596,7 @@ class TestFullPipelineZeta(PipelineTestBase):
             if e.username in ("zeta_tt", "zeta_ig")
         ]
         for exc in zeta_exceptions:
-            assert exc.reason == "not in creator list"
+            assert exc.reason == "Not in creator status list"
 
     def test_zeta_no_payout_units(self):
         """Zeta should have no payout units."""
@@ -693,7 +693,7 @@ class TestFullPipelineIota(PipelineTestBase):
             if e.username in ("iota_tt", "iota_ig")
         ]
         for exc in iota_exceptions:
-            assert exc.reason == "unpaired \u2014 no cross-platform match found"
+            assert exc.reason == "Only posted on one platform"
 
 
 # ## =======================================================================

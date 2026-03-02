@@ -108,7 +108,7 @@ def make_summary(name="Alice", qualified=2, payout=550.0, paired=1, exceptions=0
     )
 
 
-def make_exception(username="unknown", platform="tiktok", reason="not in creator list",
+def make_exception(username="unknown", platform="tiktok", reason="Not in creator status list",
                    views=1000, length=45):
     """Helper to create an ExceptionVideo."""
     return ExceptionVideo(
@@ -392,12 +392,12 @@ class TestTab3Exceptions:
         ws = wb["Exceptions"]
         headers = [cell.value for cell in ws[1]]
         assert headers == [
-            "Username", "Platform", "Video Link", "Created At",
+            "Username", "Platform", "Video Link", "Uploaded At",
             "Latest Views", "Video Length (sec)", "Reason",
         ]
 
     def test_data_accuracy(self, output_dir):
-        exc = make_exception("baduser", "instagram", "video marked private",
+        exc = make_exception("baduser", "instagram", "Video unavailable",
                              views=500, length=60)
         filepath = generate_report(
             [], [], [exc], date(2026, 2, 20), date(2026, 2, 21), output_dir,
@@ -408,13 +408,13 @@ class TestTab3Exceptions:
         assert ws.cell(row=2, column=2).value == "instagram"
         assert ws.cell(row=2, column=5).value == 500
         assert ws.cell(row=2, column=6).value == 60
-        assert ws.cell(row=2, column=7).value == "video marked private"
+        assert ws.cell(row=2, column=7).value == "Video unavailable"
 
     def test_multiple_exceptions(self, output_dir):
         """Multiple exception types all appear."""
         exceptions = [
-            make_exception("user1", "tiktok", "not in creator list"),
-            make_exception("user2", "instagram", "video marked private"),
+            make_exception("user1", "tiktok", "Not in creator status list"),
+            make_exception("user2", "instagram", "Video unavailable"),
             make_exception("user3", "tiktok", "unpaired — single platform only"),
             make_exception("user4", "tiktok", "missing video length"),
         ]
@@ -427,8 +427,8 @@ class TestTab3Exceptions:
 
         # Verify all reason types are present
         reasons = [ws.cell(row=r, column=7).value for r in range(2, 6)]
-        assert "not in creator list" in reasons
-        assert "video marked private" in reasons
+        assert "Not in creator status list" in reasons
+        assert "Video unavailable" in reasons
         assert "unpaired — single platform only" in reasons
         assert "missing video length" in reasons
 
@@ -455,7 +455,7 @@ class TestTab3Exceptions:
         wb = load_workbook(filepath)
         ws = wb["Exceptions"]
         assert ws.cell(row=2, column=1).value == "null_user"
-        assert ws.cell(row=2, column=4).value is None  # created_at
+        assert ws.cell(row=2, column=4).value is None  # uploaded_at
         assert ws.cell(row=2, column=5).value is None  # latest_views
         assert ws.cell(row=2, column=6).value is None  # video_length
 
@@ -657,9 +657,9 @@ class TestEdgeCases:
     def test_multiple_exception_reasons(self, output_dir):
         """All exception reason types should be preserved."""
         reasons = [
-            "not in creator list",
-            "video marked private",
-            "video removed",
+            "Not in creator status list",
+            "Video unavailable",
+            "Video unavailable",
             "missing video length",
             "missing view data",
             "unpaired — single platform only",
@@ -754,7 +754,7 @@ class TestFullEndToEnd:
         ]
 
         exceptions = [
-            make_exception("unknown_user", "tiktok", "not in creator list"),
+            make_exception("unknown_user", "tiktok", "Not in creator status list"),
             make_exception("creator_b_tt", "tiktok", "unpaired — single platform only",
                            views=5000),
         ]

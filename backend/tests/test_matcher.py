@@ -7,7 +7,7 @@ Test categories:
      - 3TT+3IG with fallback → 3 pairs, 1 sequence + 2 fallback
      - 5TT+3IG unequal counts → 3 pairs + 2 exceptions
      - TikTok-only creator → 0 pairs + 3 exceptions
-     - 1-second difference → 0 pairs + 2 exceptions (exact length required)
+     - 1-second difference → 1 pair + 0 exceptions (±1s tolerance)
      - 5 sec mismatch, no fallback → 0 pairs + 2 exceptions
 
   2. ADDITIONAL EDGE CASE TESTS:
@@ -422,7 +422,7 @@ class TestUnequalCounts:
         _, exceptions = _match_creator_videos(
             "Carl", self.tiktok_videos, self.instagram_videos
         )
-        unpaired_exc = [e for e in exceptions if "unpaired" in e.reason]
+        unpaired_exc = [e for e in exceptions if "Only posted on one platform" in e.reason]
         assert len(unpaired_exc) == 2
         for e in unpaired_exc:
             assert e.platform == "tiktok"
@@ -433,7 +433,7 @@ class TestUnequalCounts:
             "Carl", self.tiktok_videos, self.instagram_videos
         )
         assert len(exceptions) == 2
-        assert all(e.reason == "unpaired — no cross-platform match found" for e in exceptions)
+        assert all(e.reason == "Only posted on one platform" for e in exceptions)
         assert all(e.platform == "tiktok" for e in exceptions)
 
     def test_total_payout_units(self):
@@ -464,7 +464,7 @@ class TestTikTokOnlyCreator:
         )
         assert len(payout_units) == 0
         assert len(exceptions) == 3
-        assert all(e.reason == "unpaired — no cross-platform match found" for e in exceptions)
+        assert all(e.reason == "Only posted on one platform" for e in exceptions)
         assert all(e.platform == "tiktok" for e in exceptions)
 
 
@@ -473,25 +473,25 @@ class TestTikTokOnlyCreator:
 # ===========================================================================
 
 class TestOneSecondDifference:
-    """Creator with 1 TT + 1 IG, 1 sec difference → unpaired (exact match only)."""
+    """Creator with 1 TT + 1 IG, 1 sec difference → paired (±1s tolerance)."""
 
-    def test_plus_one_second_unpaired(self):
-        """TT=30s, IG=31s → mismatch → both unpaired (no exact length match)."""
+    def test_plus_one_second_paired(self):
+        """TT=30s, IG=31s → within ±1s tolerance → paired."""
         tt = [make_video("eve_tt", "tiktok", 30, 5000, "2026-02-20T10:00:00+00:00", "tt_e1")]
         ig = [make_video("eve_ig", "instagram", 31, 8000, "2026-02-20T10:30:00+00:00", "ig_e1")]
         payout_units, exceptions = _match_creator_videos("Eve", tt, ig)
 
-        assert len(payout_units) == 0
-        assert len(exceptions) == 2
+        assert len(payout_units) == 1
+        assert len(exceptions) == 0
 
-    def test_minus_one_second_unpaired(self):
-        """TT=31s, IG=30s → mismatch → both unpaired."""
+    def test_minus_one_second_paired(self):
+        """TT=31s, IG=30s → within ±1s tolerance → paired."""
         tt = [make_video("eve_tt", "tiktok", 31, 5000, "2026-02-20T10:00:00+00:00", "tt_e2")]
         ig = [make_video("eve_ig", "instagram", 30, 8000, "2026-02-20T10:30:00+00:00", "ig_e2")]
         payout_units, exceptions = _match_creator_videos("Eve", tt, ig)
 
-        assert len(payout_units) == 0
-        assert len(exceptions) == 2
+        assert len(payout_units) == 1
+        assert len(exceptions) == 0
 
 
 # ===========================================================================
@@ -535,7 +535,7 @@ class TestInstagramOnlyCreator:
         assert len(payout_units) == 0
         assert len(exceptions) == 2
         assert all(e.platform == "instagram" for e in exceptions)
-        assert all(e.reason == "unpaired — no cross-platform match found" for e in exceptions)
+        assert all(e.reason == "Only posted on one platform" for e in exceptions)
 
 
 # ===========================================================================
@@ -585,7 +585,7 @@ class TestCreatorMapping:
         mapped, exceptions = _map_videos_to_creators(videos, {}, {})
         assert len(mapped) == 0
         assert len(exceptions) == 1
-        assert exceptions[0].reason == "not in creator list"
+        assert exceptions[0].reason == "Not in creator status list"
         assert exceptions[0].username == "unknown_user"
 
     def test_case_insensitive_lookup(self):
@@ -708,24 +708,38 @@ class TestFallbackTimeWindow:
 # ADDITIONAL TEST: Fallback requires exact length (no ±1s)
 # ===========================================================================
 
-class TestFallbackExactLengthOnly:
-    """Fallback matching requires exact length — no ±1s tolerance."""
+class TestFallbackLengthTolerance:
+    """Fallback matching uses ±1s length tolerance (same as primary)."""
 
-    def test_fallback_rejects_1s_diff(self):
-        """Fallback should NOT accept ±1s length match — exact only."""
+    def test_fallback_accepts_1s_diff(self):
+        """Fallback should accept ±1s length match."""
         tt = [make_video("kim_tt", "tiktok", 45, 5000, "2026-02-20T10:00:00+00:00", "tt_k1")]
         ig = [
             make_video("kim_ig", "instagram", 30, 8000, "2026-02-20T10:30:00+00:00", "ig_k1"),
             make_video("kim_ig", "instagram", 46, 3000, "2026-02-20T12:00:00+00:00", "ig_k2"),
         ]
+        # Primary: TT(45) ↔ IG(30) → mismatch (diff=15) → fallback
+        # Fallback: TT(45) searches ±1 → IG#2(46) found → 1s diff → match
+        payout_units, exceptions = _match_creator_videos("Kim", tt, ig)
+        assert len(payout_units) == 1
+        assert payout_units[0].instagram_video.video_length == 46
+        assert len(exceptions) == 1  # IG(30) unpaired
+
+    def test_fallback_rejects_2s_diff(self):
+        """Fallback should reject >1s length difference."""
+        tt = [make_video("kim_tt", "tiktok", 45, 5000, "2026-02-20T10:00:00+00:00", "tt_k3")]
+        ig = [
+            make_video("kim_ig", "instagram", 30, 8000, "2026-02-20T10:30:00+00:00", "ig_k3"),
+            make_video("kim_ig", "instagram", 47, 3000, "2026-02-20T12:00:00+00:00", "ig_k4"),
+        ]
         # Primary: TT(45) ↔ IG(30) → mismatch → fallback
-        # Fallback: TT(45) searches → IG#2(46) → 1s diff → NO match (exact required)
+        # Fallback: TT(45) searches ±1 (44,45,46) → IG#2(47) not found → no match
         payout_units, exceptions = _match_creator_videos("Kim", tt, ig)
         assert len(payout_units) == 0
-        assert len(exceptions) == 3  # all unpaired: TT(45), IG(30), IG(46)
+        assert len(exceptions) == 3  # all unpaired
 
-    def test_fallback_accepts_exact_only(self):
-        """Fallback should only accept exact length match."""
+    def test_fallback_prefers_exact_over_1s(self):
+        """Fallback should find exact match even when ±1s candidates exist."""
         tt = [make_video("lee_tt", "tiktok", 45, 5000, "2026-02-20T10:00:00+00:00", "tt_l1")]
         ig = [
             make_video("lee_ig", "instagram", 30, 8000, "2026-02-20T09:00:00+00:00", "ig_l1"),
@@ -733,10 +747,10 @@ class TestFallbackExactLengthOnly:
             make_video("lee_ig", "instagram", 45, 6000, "2026-02-20T15:00:00+00:00", "ig_l3"),
         ]
         # Primary: TT(45) ↔ IG#1(30) → mismatch → fallback
-        # Fallback: TT(45) searches → IG#2(46) rejected (not exact), IG#3(45) accepted
+        # Fallback: TT(45) searches ±1 → finds IG#3(45) exact and IG#2(46) at +1
         payout_units, exceptions = _match_creator_videos("Lee", tt, ig)
         assert len(payout_units) == 1
-        # The paired IG should be IG#3 (exact match, 45s)
+        # IG#3 (exact 45s) should be preferred over IG#2 (46s)
         assert payout_units[0].instagram_video.video_length == 45
         assert len(exceptions) == 2  # IG#1(30) and IG#2(46) unpaired
 
@@ -792,7 +806,7 @@ class TestMultipleCreators:
         assert len(payout_units) == 1
 
         # Exceptions: Creator B's unpaired video
-        unpaired_exceptions = [e for e in exceptions if e.reason == "unpaired — no cross-platform match found"]
+        unpaired_exceptions = [e for e in exceptions if e.reason == "Only posted on one platform"]
         assert len(unpaired_exceptions) == 1
 
 
@@ -1037,8 +1051,8 @@ class TestFullPipelineEndToEnd:
 
         # Exceptions: 1 unmapped + 1 unpaired
         assert len(exceptions) == 2
-        unmapped = [e for e in exceptions if e.reason == "not in creator list"]
-        unpaired = [e for e in exceptions if e.reason == "unpaired — no cross-platform match found"]
+        unmapped = [e for e in exceptions if e.reason == "Not in creator status list"]
+        unpaired = [e for e in exceptions if e.reason == "Only posted on one platform"]
         assert len(unmapped) == 1
         assert unmapped[0].username == "mystery_user"
         assert len(unpaired) == 1
@@ -1111,7 +1125,7 @@ class TestCreatorNamePropagation:
 
         payout_units, exceptions = match_videos(videos, tt_map, {})
         assert len(payout_units) == 0
-        unpaired_exc = [e for e in exceptions if "unpaired" in e.reason]
+        unpaired_exc = [e for e in exceptions if "Only posted on one platform" in e.reason]
         assert len(unpaired_exc) == 1
         assert unpaired_exc[0].username == "solo_tt"
 
@@ -1529,14 +1543,14 @@ class TestZeroVideoLength:
         assert len(payout_units) == 1
 
     def test_zero_vs_one_second(self):
-        """0s TT vs 1s IG → diff = 1 → unpaired (exact length required)."""
+        """0s TT vs 1s IG → diff = 1 → paired (±1s tolerance)."""
         tt = [make_video("z01_tt", "tiktok", 0, 5000,
                           "2026-02-20T10:00:00+00:00", "tt_z01")]
         ig = [make_video("z01_ig", "instagram", 1, 8000,
                           "2026-02-20T10:30:00+00:00", "ig_z01")]
         payout_units, exceptions = _match_creator_videos("ZeroOne", tt, ig)
-        assert len(payout_units) == 0
-        assert len(exceptions) == 2
+        assert len(payout_units) == 1
+        assert len(exceptions) == 0
 
 
 # ===========================================================================
@@ -1584,7 +1598,7 @@ class TestDedupThenMatch:
 # REAL-WORLD 10: Creator mapped on TT but NOT on IG
 #
 # Google Sheet might have a TikTok handle but leave Instagram blank.
-# Videos from that IG handle go to "not in creator list" exceptions.
+# Videos from that IG handle go to "Not in creator status list" exceptions.
 # ===========================================================================
 
 class TestPartialCreatorMapping:
@@ -1605,13 +1619,13 @@ class TestPartialCreatorMapping:
         # TT is mapped but single platform → 0 payout units
         assert len(payout_units) == 0
 
-        # IG is unmapped → "not in creator list" exception
-        unmapped = [e for e in exceptions if e.reason == "not in creator list"]
+        # IG is unmapped → "Not in creator status list" exception
+        unmapped = [e for e in exceptions if e.reason == "Not in creator status list"]
         assert len(unmapped) == 1
         assert unmapped[0].username == "partial_ig"
 
         # TT is unpaired → exception
-        unpaired = [e for e in exceptions if e.reason == "unpaired — no cross-platform match found"]
+        unpaired = [e for e in exceptions if e.reason == "Only posted on one platform"]
         assert len(unpaired) == 1
 
         # Total exceptions: 1 unmapped IG + 1 unpaired TT
@@ -1760,7 +1774,7 @@ class TestSingleVideoOnly:
         payout_units, exceptions = match_videos(videos, tt_map, {})
         assert len(payout_units) == 0
 
-        unpaired_exc = [e for e in exceptions if "unpaired" in e.reason]
+        unpaired_exc = [e for e in exceptions if "Only posted on one platform" in e.reason]
         assert len(unpaired_exc) == 1
 
 
@@ -1784,7 +1798,7 @@ class TestUnknownPlatform:
         mapped, exceptions = _map_videos_to_creators(videos, {}, {})
         assert len(mapped) == 0
         assert len(exceptions) == 1
-        assert exceptions[0].reason == "not in creator list"
+        assert exceptions[0].reason == "Not in creator status list"
 
 
 # ===========================================================================
@@ -1905,9 +1919,9 @@ class TestFallbackExhaustion:
 
 class TestMixedConfidenceLevels:
     """
-    Creator with a realistic mix (exact length only):
-      - 1 exact match (high)
-      - 1 length mismatch (45 vs 46 → both unpaired, no fallback match)
+    Creator with a realistic mix (±1s tolerance):
+      - 1 exact match (30↔30)
+      - 1 near match (45↔46, diff=1 → within ±1s tolerance)
       - 1 extra TT (99s) → unpaired
 
     Setup:
@@ -1933,14 +1947,14 @@ class TestMixedConfidenceLevels:
 
         payout_units, exceptions = _match_creator_videos("MixedConf", tt, ig)
 
-        # Pair #1: 30↔30 → exact → sequence
-        # Pair #2: 45↔46 → mismatch → fallback → no match (46≠45) → both exceptions
+        # Pair #1: 30↔30 → exact → sequence match
+        # Pair #2: 45↔46 → diff=1 → within ±1s tolerance → sequence match
         # TT#3: 99s → unpaired (no IG left) → exception
 
-        assert len(payout_units) == 1  # only 30↔30
-        assert len(exceptions) == 3  # TT(45), IG(46), TT(99)
+        assert len(payout_units) == 2  # 30↔30 and 45↔46
+        assert len(exceptions) == 1  # TT(99)
 
-        assert "sequence match" in payout_units[0].match_note
+        assert all("sequence match" in pu.match_note for pu in payout_units)
 
 
 # ===========================================================================
@@ -2008,12 +2022,12 @@ class TestFullPipelineStress:
         assert len(payout_units) == 3
 
         # Exceptions:
-        # - Creator E: 2 unmapped ("not in creator list")
+        # - Creator E: 2 unmapped ("Not in creator status list")
         # - Creator B: 2 unpaired
         # - Creator C: 2 unpaired
         # - Creator D: 2 unpaired
-        unmapped_exc = [e for e in exceptions if e.reason == "not in creator list"]
-        unpaired_exc = [e for e in exceptions if "unpaired" in e.reason]
+        unmapped_exc = [e for e in exceptions if e.reason == "Not in creator status list"]
+        unpaired_exc = [e for e in exceptions if "Only posted on one platform" in e.reason]
         assert len(unmapped_exc) == 2
         assert len(unpaired_exc) == 6  # B(2) + C(2) + D(2)
         assert len(exceptions) == 8  # 2 unmapped + 6 unpaired
@@ -2195,7 +2209,7 @@ class TestCrossCreatorIsolation:
         assert len(exceptions) == 4
 
         # All exceptions are unpaired
-        assert all(e.reason == "unpaired — no cross-platform match found" for e in exceptions)
+        assert all(e.reason == "Only posted on one platform" for e in exceptions)
 
 
 # ===========================================================================

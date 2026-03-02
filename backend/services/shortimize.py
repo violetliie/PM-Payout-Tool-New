@@ -289,6 +289,7 @@ def _parse_and_standardize(raw: dict) -> tuple[Optional[Video], Optional[Excepti
             username=username,
             platform=platform,
             ad_link=ad_link,
+            uploaded_at=_parse_date(raw.get("uploaded_at")),
             created_at=_parse_datetime(raw.get("created_at")),
             latest_views=_safe_int(raw.get("latest_views")),
             video_length=_safe_int(raw.get("video_length")),
@@ -332,8 +333,8 @@ def _filter_invalid(
     Filter out invalid videos per SPEC.md Step 4.
 
     Invalid conditions (each produces an ExceptionVideo):
-      - private == True → "video marked private"
-      - removed == True → "video removed"
+      - private == True → "Video unavailable"
+      - removed == True → "Video unavailable"
       - video_length is None → "missing video length"
       - latest_views is None → "missing view data"
 
@@ -351,6 +352,7 @@ def _filter_invalid(
                 username=v.username,
                 platform=v.platform,
                 ad_link=v.ad_link,
+                uploaded_at=v.uploaded_at,
                 created_at=v.created_at,
                 latest_views=v.latest_views,
                 video_length=v.video_length,
@@ -369,9 +371,9 @@ def _get_filter_reason(v: Video) -> Optional[str]:
     or None if the video is valid.
     """
     if v.private:
-        return "video marked private"
+        return "Video unavailable"
     if v.removed:
-        return "video removed"
+        return "Video unavailable"
     if v.video_length is None:
         return "missing video length"
     if v.video_length <= 0:

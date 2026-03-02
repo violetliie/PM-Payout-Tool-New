@@ -80,7 +80,7 @@ def make_video(
     )
 
 
-def make_exception(username="unknown", platform="tiktok", reason="not in creator list"):
+def make_exception(username="unknown", platform="tiktok", reason="Not in creator status list"):
     return ExceptionVideo(
         username=username, platform=platform,
         ad_link=f"https://{platform}.com/@{username}/456",
@@ -105,7 +105,7 @@ MOCK_VIDEOS = [
 ]
 
 MOCK_API_EXCEPTIONS = [
-    make_exception("private_user", "tiktok", "video marked private"),
+    make_exception("private_user", "tiktok", "Video unavailable"),
 ]
 
 
@@ -344,9 +344,9 @@ class TestCountExceptionsPerCreator:
     def test_mapped_exceptions_counted(self):
         """Exceptions for known creators are counted."""
         exceptions = [
-            make_exception("alice_tt", "tiktok", "video marked private"),
+            make_exception("alice_tt", "tiktok", "Video unavailable"),
             make_exception("alice_ig", "instagram", "unpaired — single platform only"),
-            make_exception("bob_tt", "tiktok", "video removed"),
+            make_exception("bob_tt", "tiktok", "Video unavailable"),
         ]
         counts = _count_exceptions_per_creator(exceptions, MOCK_TT_MAP, MOCK_IG_MAP)
         assert counts["Alice"] == 2  # alice_tt + alice_ig
@@ -355,7 +355,7 @@ class TestCountExceptionsPerCreator:
     def test_unmapped_exceptions_skipped(self):
         """Exceptions for unknown users don't appear in counts."""
         exceptions = [
-            make_exception("unknown_user", "tiktok", "not in creator list"),
+            make_exception("unknown_user", "tiktok", "Not in creator status list"),
         ]
         counts = _count_exceptions_per_creator(exceptions, MOCK_TT_MAP, MOCK_IG_MAP)
         assert len(counts) == 0
@@ -363,8 +363,8 @@ class TestCountExceptionsPerCreator:
     def test_mixed_mapped_and_unmapped(self):
         exceptions = [
             make_exception("alice_tt", "tiktok", "unpaired — single platform only"),
-            make_exception("stranger", "instagram", "not in creator list"),
-            make_exception("bob_ig", "instagram", "video marked private"),
+            make_exception("stranger", "instagram", "Not in creator status list"),
+            make_exception("bob_ig", "instagram", "Video unavailable"),
         ]
         counts = _count_exceptions_per_creator(exceptions, MOCK_TT_MAP, MOCK_IG_MAP)
         assert counts.get("Alice") == 1
@@ -458,7 +458,7 @@ class TestMultiCreatorPipeline:
         Creator A: 2TT + 2IG (all paired, lengths match) → 2 PayoutUnits
         Creator B: 1TT only → unpaired → exception (no PayoutUnit)
         Creator C: 1IG only → unpaired → exception (no PayoutUnit)
-        + 1 unmapped TT video → exception ("not in creator list")
+        + 1 unmapped TT video → exception ("Not in creator status list")
         + 1 API exception (private)
 
         Only CreatorA appears in creator summaries (B and C have 0 payout units).
@@ -486,7 +486,7 @@ class TestMultiCreatorPipeline:
         ]
 
         api_exceptions = [
-            make_exception("ca_tt", "tiktok", "video marked private"),
+            make_exception("ca_tt", "tiktok", "Video unavailable"),
         ]
 
         mock_fetch_mapping.return_value = (creators, tt_map, ig_map)
@@ -513,7 +513,7 @@ class TestMultiCreatorPipeline:
 
         # Exceptions:
         # 1 api exception (private ca_tt)
-        # 1 match: unmapped random_user ("not in creator list")
+        # 1 match: unmapped random_user ("Not in creator status list")
         # 2 match: unpaired (cb_tt, cc_ig)
         assert summary["total_exceptions"] == 4
 
@@ -531,8 +531,8 @@ class TestAllExceptions:
         mock_fetch_mapping.return_value = (MOCK_CREATORS, MOCK_TT_MAP, MOCK_IG_MAP)
         # All videos are exceptions, no valid videos
         mock_fetch_videos.return_value = ([], [
-            make_exception("user1", "tiktok", "video marked private"),
-            make_exception("user2", "instagram", "video removed"),
+            make_exception("user1", "tiktok", "Video unavailable"),
+            make_exception("user2", "instagram", "Video unavailable"),
         ])
 
         response = client.post("/api/calculate", json={
@@ -570,5 +570,5 @@ class TestNoCreatorMapping:
         data = response.json()
         assert data["summary"]["total_creators"] == 0
         assert data["summary"]["total_payout"] == 0
-        # All 3 videos should be in exceptions as "not in creator list"
+        # All 3 videos should be in exceptions as "Not in creator status list"
         assert data["summary"]["total_exceptions"] == 3

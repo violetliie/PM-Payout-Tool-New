@@ -148,10 +148,11 @@ def _map_videos_to_creators(
                 username=video.username,
                 platform=video.platform,
                 ad_link=video.ad_link,
+                uploaded_at=video.uploaded_at,
                 created_at=video.created_at,
                 latest_views=video.latest_views,
                 video_length=video.video_length,
-                reason="not in creator list",
+                reason="Not in creator status list",
             ))
 
     return mapped, exceptions
@@ -343,9 +344,9 @@ def _match_creator_videos(
         tt_video = tiktok_sorted[i]
         ig_video = instagram_sorted[i]
 
-        # Check 1: Exact video_length match
+        # Check 1: Video length match (±1 second tolerance)
         length_diff = _video_length_diff(tt_video, ig_video)
-        if length_diff is None or length_diff != 0:
+        if length_diff is None or length_diff > 1:
             logger.debug(
                 f"  Pair #{i+1}: length mismatch → unmatched pool "
                 f"(TT={tt_video.video_length}s, IG={ig_video.video_length}s)"
@@ -440,7 +441,10 @@ def _match_creator_videos(
         if tt_video.video_length is None:
             continue
 
-        candidates = ig_by_length.get(tt_video.video_length, [])
+        # ±1 second tolerance: check exact, +1, and -1
+        candidates = []
+        for offset in (-1, 0, 1):
+            candidates.extend(ig_by_length.get(tt_video.video_length + offset, []))
         best_ig_idx = None
         best_phash = None
 
@@ -478,10 +482,11 @@ def _match_creator_videos(
                 username=tt_video.username,
                 platform=tt_video.platform,
                 ad_link=tt_video.ad_link,
+                uploaded_at=tt_video.uploaded_at,
                 created_at=tt_video.created_at,
                 latest_views=tt_video.latest_views,
                 video_length=tt_video.video_length,
-                reason="unpaired — no cross-platform match found",
+                reason="Only posted on one platform",
             ))
 
     for i, ig_video in enumerate(instagram_sorted):
@@ -490,10 +495,11 @@ def _match_creator_videos(
                 username=ig_video.username,
                 platform=ig_video.platform,
                 ad_link=ig_video.ad_link,
+                uploaded_at=ig_video.uploaded_at,
                 created_at=ig_video.created_at,
                 latest_views=ig_video.latest_views,
                 video_length=ig_video.video_length,
-                reason="unpaired — no cross-platform match found",
+                reason="Only posted on one platform",
             ))
 
     # Log summary for this creator
@@ -516,10 +522,11 @@ def _build_extraction_failed_exception(video: Video) -> ExceptionVideo:
         username=video.username,
         platform=video.platform,
         ad_link=video.ad_link,
+        uploaded_at=video.uploaded_at,
         created_at=video.created_at,
         latest_views=video.latest_views,
         video_length=video.video_length,
-        reason="first frame extraction failed",
+        reason="Video unavailable",
     )
 
 
